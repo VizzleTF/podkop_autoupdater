@@ -1,13 +1,17 @@
 # Podkop Updater for OpenWrt
 
-This script (`podkop_updater.sh`) automates checking for updates to the `podkop` package on an OpenWrt router. It compares the installed version with the latest release on GitHub, sends a Telegram notification if an update is available, and $\(\text{update}\), and applies the update upon user confirmation via Telegram. The script handles interactive prompts in the `podkop` update script automatically.
+This script (`podkop_updater.sh`) automates checking for updates to the `podkop` package on an OpenWrt router. It supports three modes: manual updates via console, automatic updates without confirmation, and automatic updates with Telegram bot confirmation (default).
 
 ## Features
 - Checks the latest `podkop` version via GitHub API.
 - Compares with the installed version using `opkg`.
-- Sends a Telegram message asking to update (requires a "yes" or "no" reply).
-- Automates the update process, answering two prompts: upgrade `podkop` and install Russian translation.
-- Logs all actions to `/tmp/podkop_update.log` for debugging.
+- Supports three modes:
+  - **Manual**: Run via console without cron (`/usr/bin/podkop_updater.sh`).
+  - **Automatic**: Run via cron without Telegram confirmation (`--force`).
+  - **Telegram**: Run via cron with Telegram bot confirmation (default).
+- Sends Telegram messages for confirmation in Telegram mode (requires "yes" or "no" reply).
+- Automates update script prompts: upgrade `podkop` and install Russian translation.
+- Logs actions to `/tmp/podkop_update.log`.
 - Supports case-insensitive Telegram responses ("yes", "Yes", "YES", etc.).
 
 ## Requirements
@@ -16,12 +20,12 @@ This script (`podkop_updater.sh`) automates checking for updates to the `podkop`
   - `curl`: For API requests (usually pre-installed).
   - `jq`: For JSON parsing (dependency of `podkop`).
   - `wget`: For downloading the update script.
-- **Telegram bot**:
+- **Telegram bot** (for Telegram mode):
   - Create a bot via [@BotFather](https://t.me/BotFather) and obtain a token.
   - Get your chat ID via [@get_id_bot](https://t.me/get_id_bot) or similar.
 - **Network access** to:
   - GitHub API (`api.github.com`).
-  - Telegram API (`api.telegram.org`).
+  - Telegram API (`api.telegram.org`) for Telegram mode.
   - OpenWrt package repositories and `podkop` update script URL.
 
 ## Installation
@@ -30,10 +34,13 @@ Run the installer script with a single command:
 sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/install.sh)
 ```
 The installer will:
-- Download `podkop_updater.sh` to `/usr/bin/`.
 - Install required packages (`curl`, `jq`, `wget`).
-- Prompt for Telegram bot token, chat ID, and cron frequency (in hours).
-- Configure the script and set up a cron job.
+- Download `podkop_updater.sh` to `/usr/bin/`.
+- Prompt for update mode:
+  - Manual: Installs script without cron or Telegram setup.
+  - Automatic: Prompts for cron frequency (in hours).
+  - Telegram (default): Prompts for cron frequency, bot token, and chat ID.
+- Configure the script and cron job as needed.
 - Verify network access to GitHub and Telegram APIs.
 
 ## Manual Installation
@@ -42,7 +49,7 @@ The installer will:
    wget -O /usr/bin/podkop_updater.sh https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh
    chmod +x /usr/bin/podkop_updater.sh
    ```
-2. **Configure Telegram**:
+2. **Configure Telegram** (for Telegram mode):
    - Edit the script (`vi /usr/bin/podkop_updater.sh`).
    - Replace `your_bot_token` with your Telegram bot token.
    - Replace `your_chat_id` with your Telegram chat ID.
@@ -52,43 +59,40 @@ The installer will:
    ```
 
 ## Usage
-1. **Run Manually**:
+1. **Manual Mode**:
    ```sh
    /usr/bin/podkop_updater.sh
    ```
-   - If a new `podkop` version is available, you’ll receive a Telegram message:
+   - Checks for updates and sends a Telegram message if a new version is available:
      ```
      New version available: 0.3.43. Current: 0.3.41-1. Reply to this message with 'yes' to update or 'no' to cancel.
      ```
    - Reply **directly** to the message with "yes" to update or "no" to cancel.
-   - The script waits 5 minutes for a response and logs actions to `/tmp/podkop_update.log`.
-2. **Automate with Cron**:
-   - The installer sets up a cron job based on your specified frequency (e.g., hourly, every 6 hours).
-   - To modify, edit the crontab:
+   - Logs actions to `/tmp/podkop_update.log`.
+2. **Automatic Mode (via cron)**:
+   - Configured by the installer with `--force`:
      ```sh
-     crontab -e
+     /usr/bin/podkop_updater.sh --force
      ```
-     Example for hourly execution:
-     ```sh
-     PATH=/usr/bin:/bin:/usr/sbin:/sbin
-     0 * * * * /usr/bin/podkop_updater.sh
-     ```
+   - Updates automatically without Telegram confirmation.
+3. **Telegram Mode (via cron)**:
+   - Configured by the installer (default).
+   - Runs periodically, sends Telegram messages for confirmation, and waits 5 minutes for a response.
 
 ## How It Works
 1. **Version Check**:
    - Fetches the latest `podkop` release from [GitHub](https://api.github.com/repos/itdoginfo/podkop/releases/latest).
    - Gets the installed version via `opkg info podkop`.
-2. **Notification**:
-   - If a new version is available, sends a Telegram message.
-3. **User Response**:
-   - Polls Telegram API every 5 seconds for a "yes" or "no" reply (case-insensitive).
-4. **Update**:
-   - On "yes," runs the update script (`https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh`).
-   - Automatically answers two prompts:
+2. **Mode Handling**:
+   - **Manual/Telegram**: Sends a Telegram message and waits for "yes" or "no".
+   - **Automatic**: Updates immediately if `--force` is used.
+3. **Update**:
+   - Runs the update script (`https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh`).
+   - Answers two prompts:
      - "Just upgrade podkop?" → `y`
      - "Need a Russian translation?" → `y`
-5. **Logging**:
-   - All actions, including Telegram responses and update script output, are logged to `/tmp/podkop_update.log`.
+4. **Logging**:
+   - Logs actions to `/tmp/podkop_update.log`.
 
 ## Troubleshooting
 - **Telegram message not sent**:
@@ -132,7 +136,7 @@ The installer will:
     ```
 
 ## Example Log
-A successful run might look like:
+A successful Telegram mode run:
 ```
 Starting podkop update check at Fri May 2 14:00:00 UTC 2025
 Telegram API connection successful
@@ -148,11 +152,23 @@ Update requested (yes response detected)
 Update script executed successfully
 ```
 
+A successful automatic mode run:
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Running in force mode (automatic update without Telegram)
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Proceeding with automatic update
+[output from install.sh]
+Update script executed successfully
+```
+
 ## License
 This script is released under the [MIT License](https://opensource.org/licenses/MIT).
 
 ## Contributing
-Feel free to submit issues or pull requests to improve the script. Suggestions for better error handling, additional features, or support for other languages are welcome.
+Submit issues or pull requests to improve the script. Suggestions for better error handling, additional features, or language support are welcome.
 
 ## Credits
 Developed for automating `podkop` updates on OpenWrt routers, leveraging the [podkop](https://github.com/itdoginfo/podkop) project’s installation script.
