@@ -1,0 +1,176 @@
+# Обновление Podkop для OpenWrt
+
+[English version](./README.md)
+
+Этот скрипт (`podkop_updater.sh`) автоматизирует проверку обновлений пакета `podkop` на маршрутизаторе OpenWrt. Поддерживаются три режима: ручное обновление через консоль, автоматическое обновление без подтверждения и автоматическое обновление с подтверждением через Telegram-бота (по умолчанию).
+
+## Возможности
+- Проверяет последнюю версию `podkop` через API GitHub.
+- Сравнивает с установленной версией с помощью `opkg`.
+- Поддерживает три режима:
+  - **Ручной**: Запуск через консоль без cron (`/usr/bin/podkop_updater.sh`).
+  - **Автоматический**: Запуск через cron без подтверждения Telegram (`--force`).
+  - **Telegram**: Запуск через cron с подтверждением через Telegram-бота (по умолчанию).
+- Отправляет сообщения в Telegram для подтверждения в режиме Telegram (требуется ответ "yes" или "no").
+- Автоматизирует ответы на запросы скрипта обновления: обновление `podkop` и установка русской локализации.
+- Логирует действия в `/tmp/podkop_update.log`.
+- Поддерживает регистронезависимые ответы в Telegram ("yes", "Yes", "YES" и т.д.).
+
+## Требования
+- **Маршрутизатор OpenWrt** с доступом в интернет.
+- **Установленные пакеты**:
+  - `curl`: Для запросов к API (обычно предустановлен).
+  - `jq`: Для обработки JSON (зависимость `podkop`).
+  - `wget`: Для загрузки скрипта обновления.
+- **Telegram-бот** (для режима Telegram):
+  - Создайте бота через [@BotFather](https://t.me/BotFather) и получите токен.
+  - Получите ID чата через [@get_id_bot](https://t.me/get_id_bot) или аналогичный сервис.
+- **Сетевой доступ** к:
+  - API GitHub (`api.github.com`).
+  - API Telegram (`api.telegram.org`) для режима Telegram.
+  - Репозиториям пакетов OpenWrt и URL скрипта обновления `podkop`.
+
+## Установка
+Запустите скрипт установщика одной командой:
+```sh
+sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/install.sh)
+```
+Установщик:
+- Установит необходимые пакеты (`curl`, `jq`, `wget`).
+- Загрузит `podkop_updater.sh` в `/usr/bin/`.
+- Запросит режим обновления:
+  - Ручной: Устанавливает скрипт без cron или настройки Telegram.
+  - Автоматический: Запрашивает частоту cron (в часах).
+  - Telegram (по умолчанию): Запрашивает частоту cron, токен бота и ID чата.
+- Настроит скрипт и задание cron при необходимости.
+- Проверит сетевой доступ к API GitHub и Telegram.
+
+## Ручная установка
+1. **Сохранение скрипта**:
+   ```sh
+   wget -O /usr/bin/podkop_updater.sh https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh
+   chmod +x /usr/bin/podkop_updater.sh
+   ```
+2. **Настройка Telegram** (для режима Telegram):
+   - Отредактируйте скрипт (`vi /usr/bin/podkop_updater.sh`).
+   - Замените `your_bot_token` на токен Telegram-бота.
+   - Замените `your_chat_id` на ID чата.
+3. **Проверка зависимостей**:
+   ```sh
+   opkg update && opkg install curl jq wget
+   ```
+
+## Использование
+1. **Ручной режим**:
+   ```sh
+   /usr/bin/podkop_updater.sh
+   ```
+   - Проверяет обновления и отправляет сообщение в Telegram, если доступна новая версия:
+     ```
+     Доступна новая версия: 0.3.43. Текущая: 0.3.41-1. Ответьте на это сообщение "yes" для обновления или "no" для отмены.
+     ```
+   - Ответьте **непосредственно** на сообщение "yes" для обновления или "no" для отмены.
+   - Действия логируются в `/tmp/podkop_update.log`.
+2. **Автоматический режим (через cron)**:
+   - Настраивается установщиком с параметром `--force`:
+     ```sh
+     /usr/bin/podkop_updater.sh --force
+     ```
+   - Выполняет обновление автоматически без подтверждения Telegram.
+3. **Режим Telegram (через cron)**:
+   - Настраивается установщиком (по умолчанию).
+   - Периодически запускается, отправляет сообщения в Telegram для подтверждения и ждет ответа 5 минут.
+
+## Как это работает
+1. **Проверка версии**:
+   - Загружает последнюю версию `podkop` с [GitHub](https://api.github.com/repos/itdoginfo/podkop/releases/latest).
+   - Получает установленную версию через `opkg info podkop`.
+2. **Обработка режима**:
+   - **Ручной/Telegram**: Отправляет сообщение в Telegram и ждет ответа "yes" или "no".
+   - **Автоматический**: Выполняет обновление немедленно, если используется `--force`.
+3. **Обновление**:
+   - Запускает скрипт обновления (`https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh`).
+   - Автоматически отвечает на два запроса:
+     - "Просто обновить podkop?" → `y`
+     - "Нужен русский перевод?" → `y`
+4. **Логирование**:
+   - Все действия логируются в `/tmp/podkop_update.log`.
+
+## Устранение неполадок
+- **Сообщение Telegram не отправлено**:
+  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Cannot connect to Telegram API").
+  - Убедитесь в правильности `BOT_TOKEN` и `CHAT_ID`.
+  - Проверьте доступ к `api.telegram.org`:
+    ```sh
+    ping api.telegram.org
+    curl -s https://api.telegram.org/bot<your_bot_token>/getMe
+    ```
+- **Ответ "yes" не обнаружен**:
+  - Убедитесь, что вы отвечаете **непосредственно** на сообщение бота (нажмите "Ответить" в Telegram).
+  - Проверьте настройки приватности бота в [@BotFather](https://t.me/BotFather):
+    ```sh
+    /setprivacy -> Выберите вашего бота -> Отключить
+    ```
+  - Выполните запрос к API Telegram:
+    ```sh
+    curl -s "https://api.telegram.org/bot<your_bot_token>/getUpdates"
+    ```
+    Ищите ответ "yes" с `reply_to_message.message_id`, соответствующим ID сообщения бота.
+- **Сбой скрипта обновления**:
+  - Протестируйте скрипт обновления вручную:
+    ```sh
+    echo -e "y\ny\n" | sh <(wget -O - https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh)
+    ```
+  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Failed to fetch update script").
+  - Убедитесь, что `wget` установлен и на маршрутизаторе достаточно памяти/места:
+    ```sh
+    df -h
+    free
+    ```
+- **Новая версия не обнаружена**:
+  - Проверьте доступ к API GitHub:
+    ```sh
+    curl -s https://api.github.com/repos/itdoginfo/podkop/releases/latest
+    ```
+  - Проверьте установленную версию:
+    ```sh
+    opkg info podkop
+    ```
+
+## Пример лога
+Успешный запуск в режиме Telegram:
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Telegram API connection successful
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Sent Telegram message, ID: 1501
+Initial offset: 2
+Polling updates, offset: 2
+Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":1502,"chat":{"id":<chat_id>},"text":"yes","reply_to_message":{"message_id":1501}}}]}
+Update requested (yes response detected)
+[output from install.sh, including package downloads and installation]
+Update script executed successfully
+```
+
+Успешный запуск в автоматическом режиме:
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Running in force mode (automatic update without Telegram)
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Proceeding with automatic update
+[output from install.sh]
+Update script executed successfully
+```
+
+## Лицензия
+Скрипт распространяется под [лицензией MIT](https://opensource.org/licenses/MIT).
+
+## Вклад
+Присылайте вопросы или запросы на включение изменений для улучшения скрипта. Приветствуются предложения по улучшению обработки ошибок, добавлению функций или поддержке других языков.
+
+## Благодарности
+Разработано для автоматизации обновлений `podkop` на маршрутизаторах OpenWrt с использованием скрипта установки проекта [podkop](https://github.com/itdoginfo/podkop).
