@@ -1,5 +1,7 @@
 # Podkop Updater for OpenWrt
 
+[Русская версия](./README_ru.md)
+
 This script (`podkop_updater.sh`) automates checking for updates to the `podkop` package on an OpenWrt router. It supports three modes: manual updates via console, automatic updates without confirmation, and automatic updates with Telegram bot confirmation (default).
 
 ## Features
