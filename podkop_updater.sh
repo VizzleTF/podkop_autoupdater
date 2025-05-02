@@ -83,7 +83,6 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
       else
         echo "Error: Update script failed" >> $LOG_FILE
         exit 1
-       exit 1
       fi
       exit 0
     fi
