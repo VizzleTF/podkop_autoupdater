@@ -1,8 +1,8 @@
+[Русская версия (Russian version)](./README_ru.md)
+
 # Podkop Updater for OpenWrt
 
-[Русская версия](./README_ru.md)
-
-This script (`podkop_updater.sh`) automates checking for updates to the `podkop` package on an OpenWrt router. It supports three modes: manual updates via console, automatic updates without confirmation, and automatic updates with Telegram bot confirmation (default).
+This script (`podkop_updater.sh`) automates checking for updates to the `podkop` package on an OpenWrt or ImmortalWrt router. It supports three modes: manual updates via console, automatic updates without confirmation, and automatic updates with Telegram bot confirmation (default).
 
 ## Features
 - Checks the latest `podkop` version via GitHub API.
@@ -11,24 +11,26 @@ This script (`podkop_updater.sh`) automates checking for updates to the `podkop`
   - **Manual**: Run via console without cron (`/usr/bin/podkop_updater.sh`).
   - **Automatic**: Run via cron without Telegram confirmation (`--force`).
   - **Telegram**: Run via cron with Telegram bot confirmation (default).
-- Sends Telegram messages for confirmation in Telegram mode (requires "yes" or "no" reply).
+- Sends Telegram messages for confirmation, post-update success, or failure in Telegram mode.
 - Automates update script prompts: upgrade `podkop` and install Russian translation.
+- Performs a post-update DNS check to verify `podkop` functionality.
 - Logs actions to `/tmp/podkop_update.log`.
 - Supports case-insensitive Telegram responses ("yes", "Yes", "YES", etc.).
 
 ## Requirements
-- **OpenWrt router** with internet access.
+- **OpenWrt or ImmortalWrt router** with internet access.
 - **Installed packages**:
   - `curl`: For API requests (usually pre-installed).
   - `jq`: For JSON parsing (dependency of `podkop`).
   - `wget`: For downloading the update script.
+  - `nslookup`: For post-update DNS check (provided by `busybox` or `bind-tools`).
 - **Telegram bot** (for Telegram mode):
   - Create a bot via [@BotFather](https://t.me/BotFather) and obtain a token.
   - Get your chat ID via [@get_id_bot](https://t.me/get_id_bot) or similar.
 - **Network access** to:
   - GitHub API (`api.github.com`).
   - Telegram API (`api.telegram.org`) for Telegram mode.
-  - OpenWrt package repositories and `podkop` update script URL.
+  - OpenWrt/ImmortalWrt package repositories and `podkop` update script URL.
 
 ## Installation
 Run the installer script with a single command:
@@ -70,16 +72,27 @@ The installer will:
      New version available: 0.3.43. Current: 0.3.41-1. Reply to this message with 'yes' to update or 'no' to cancel.
      ```
    - Reply **directly** to the message with "yes" to update or "no" to cancel.
+   - After an update attempt, receives a Telegram message with the result:
+     - Success:
+       ```
+       Update to version 0.3.43 succeeded.
+       DNS check passed: fakeip.podkop.net resolved to 198.18.x.x
+       ```
+     - Failure:
+       ```
+       Update to version 0.3.43 failed: Update script execution error. No DNS check performed.
+       ```
    - Logs actions to `/tmp/podkop_update.log`.
 2. **Automatic Mode (via cron)**:
    - Configured by the installer with `--force`:
      ```sh
      /usr/bin/podkop_updater.sh --force
      ```
-   - Updates automatically without Telegram confirmation.
+   - Updates automatically without Telegram confirmation or notifications.
 3. **Telegram Mode (via cron)**:
    - Configured by the installer (default).
    - Runs periodically, sends Telegram messages for confirmation, and waits 5 minutes for a response.
+   - Sends a post-update Telegram message with success or failure status.
 
 ## How It Works
 1. **Version Check**:
@@ -93,12 +106,29 @@ The installer will:
    - Answers two prompts:
      - "Just upgrade podkop?" → `y`
      - "Need a Russian translation?" → `y`
-4. **Logging**:
-   - Logs actions to `/tmp/podkop_update.log`.
+4. **Post-Update Check** (if update succeeds):
+   - Waits 1 minute after a successful update.
+   - Runs `nslookup -timeout=2 fakeip.podkop.net 127.0.0.42`.
+   - Checks if the resolved IP is in `198.18.0.0/16` (e.g., `198.18.0.181`).
+   - Logs success if the IP matches, or failure if it doesn’t.
+5. **Telegram Notification** (Telegram mode only):
+   - Sent after update attempt:
+     - Success: Reports update success and DNS check result.
+     - Failure: Reports update failure (e.g., wget missing, script fetch failed, execution error) and notes no DNS check was performed.
+   - Example messages:
+     ```
+     Update to version 0.3.43 succeeded.
+     DNS check passed: fakeip.podkop.net resolved to 198.18.x.x
+     ```
+     ```
+     Update to version 0.3.43 failed: Update script execution error. No DNS check performed.
+     ```
+6. **Logging**:
+   - Logs actions, including post-update check and Telegram notifications, to `/tmp/podkop_update.log`.
 
 ## Troubleshooting
 - **Telegram message not sent**:
-  - Check `/tmp/podkop_update.log` for errors (e.g., "Cannot connect to Telegram API").
+  - Check `/tmp/podkop_update.log` for errors (e.g., "Cannot connect to Telegram API" or "Failed to send Telegram notification").
   - Verify `BOT_TOKEN` and `CHAT_ID`.
   - Ensure the router can reach `api.telegram.org`:
     ```sh
@@ -121,12 +151,21 @@ The installer will:
     ```sh
     echo -e "y\ny\n" | sh <(wget -O - https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh)
     ```
-  - Check `/tmp/podkop_update.log` for errors (e.g., "Failed to fetch update script").
+  - Check `/tmp/podkop_update.log` for errors (e.g., "Failed to fetch update script", "Update script execution error").
   - Ensure `wget` is installed and the router has enough memory/storage:
     ```sh
     df -h
     free
     ```
+  - In Telegram mode, expect a failure notification, e.g., "Update to version X failed: Update script execution error."
+- **Post-update check fails**:
+  - Verify `nslookup` is available:
+    ```sh
+    nslookup -timeout=2 fakeip.podkop.net 127.0.0.42
+    ```
+  - Check `/tmp/podkop_update.log` for the `nslookup` output.
+  - Ensure `podkop` services are running and DNS is configured correctly.
+  - If the IP is not in `198.18.0.0/16`, `podkop` may not be functioning properly.
 - **No new version detected**:
   - Verify GitHub API access:
     ```sh
@@ -152,6 +191,32 @@ Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":15
 Update requested (yes response detected)
 [output from install.sh, including package downloads and installation]
 Update script executed successfully
+Waiting 1 minute before performing post-update DNS check...
+Running nslookup check for fakeip.podkop.net...
+Server:         127.0.0.42
+Address:        127.0.0.42:53
+Non-authoritative answer:
+Name:   fakeip.podkop.net
+Address: 198.18.0.181
+Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
+Sent Telegram notification: Update to version 0.3.43 succeeded. DNS check passed: fakeip.podkop.net resolved to 198.18.x.x
+```
+
+A failed Telegram mode run (update script execution error):
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Telegram API connection successful
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Sent Telegram message, ID: 1501
+Initial offset: 2
+Polling updates, offset: 2
+Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":1502,"chat":{"id":<chat_id>},"text":"yes","reply_to_message":{"message_id":1501}}}]}
+Update requested (yes response detected)
+[output from install.sh, with error]
+Error: Update script failed
+Sent Telegram notification: Update to version 0.3.43 failed: Update script execution error. No DNS check performed.
 ```
 
 A successful automatic mode run:
@@ -164,6 +229,14 @@ New version available: 0.3.43 (current: 0.3.41-1)
 Proceeding with automatic update
 [output from install.sh]
 Update script executed successfully
+Waiting 1 minute before performing post-update DNS check...
+Running nslookup check for fakeip.podkop.net...
+Server:         127.0.0.42
+Address:        127.0.0.42:53
+Non-authoritative answer:
+Name:   fakeip.podkop.net
+Address: 198.18.0.181
+Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
 ```
 
 ## License
@@ -173,4 +246,4 @@ This script is released under the [MIT License](https://opensource.org/licenses/
 Submit issues or pull requests to improve the script. Suggestions for better error handling, additional features, or language support are welcome.
 
 ## Credits
-Developed for automating `podkop` updates on OpenWrt routers, leveraging the [podkop](https://github.com/itdoginfo/podkop) project’s installation script.
+Developed for automating `podkop` updates on OpenWrt and ImmortalWrt routers, leveraging the [podkop](https://github.com/itdoginfo/podkop) project’s installation script.
