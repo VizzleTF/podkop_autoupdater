@@ -9,8 +9,8 @@ UPDATER_PATH="/usr/bin/podkop_updater.sh"
 LOG_FILE="/tmp/podkop_update.log"
 
 # Step 1: Check if running on OpenWrt
-if ! grep -q "OpenWrt" /etc/os-release; then
-  echo "Error: This script is designed for OpenWrt. Exiting."
+if ! grep -q -e "OpenWrt" -e "immortalwrt" /etc/os-release; then
+  echo "Error: This script is designed for OpenWrt or ImmortalWrt. Exiting."
   exit 1
 fi
 
