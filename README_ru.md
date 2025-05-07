@@ -13,7 +13,7 @@
   - **Telegram**: Запуск через cron с подтверждением через Telegram-бота (по умолчанию).
 - Отправляет сообщения в Telegram для подтверждения, успешного или неуспешного обновления в режиме Telegram.
 - Автоматизирует ответы на запросы скрипта обновления: обновление `podkop` и установка русской локализации.
-- Выполняет проверку DNS после успешного обновления для подтверждения работоспособности `podkop`.
+- Выполняет проверку DNS после успешного обновления, используя домен из переменной `TEST_DOMAIN` в `/usr/bin/podkop`, для подтверждения работоспособности `podkop`.
 - Логирует действия в `/tmp/podkop_update.log`.
 - Поддерживает регистронезависимые ответы в Telegram ("yes", "Yes", "YES" и т.д.).
 
@@ -76,11 +76,16 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
      - Успех:
        ```
        Обновление до версии 0.3.43 выполнено успешно.
-       Проверка DNS пройдена: fakeip.podkop.net разрешено в 198.18.x.x
+       Проверка DNS пройдена: fakeip.podkop.fyi разрешено в 198.18.x.x
        ```
      - Неудача:
        ```
        Обновление до версии 0.3.43 не удалось: Ошибка выполнения скрипта обновления. Проверка DNS не выполнялась.
+       ```
+     - Неудача проверки DNS из-за отсутствия TEST_DOMAIN:
+       ```
+       Обновление до версии 0.3.43 выполнено успешно.
+       Проверка DNS не удалась: Не удалось получить TEST_DOMAIN из /usr/bin/podkop.
        ```
    - Действия логируются в `/tmp/podkop_update.log`.
 2. **Автоматический режим (через cron)**:
@@ -107,21 +112,27 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
      - "Просто обновить podkop?" → `y`
      - "Нужен русский перевод?" → `y`
 4. **Проверка после обновления** (при успешном обновлении):
+   - Извлекает `TEST_DOMAIN` из `/usr/bin/podkop`.
+   - Если `TEST_DOMAIN` не найден, логирует ошибку и, в режиме Telegram, отправляет уведомление.
    - Ждет 1 минуту после успешного обновления.
-   - Выполняет `nslookup -timeout=2 fakeip.podkop.net 127.0.0.42`.
+   - Выполняет `nslookup -timeout=2 $TEST_DOMAIN 127.0.0.42`.
    - Проверяет, разрешен ли IP в диапазоне `198.18.0.0/16` (например, `198.18.0.181`).
    - Логирует успех, если IP соответствует, или неудачу, если нет.
 5. **Уведомление Telegram** (только в режиме Telegram):
    - Отправляется после попытки обновления:
-     - Успех: Сообщает об успешном обновлении и результате проверки DNS.
+     - Успех: Сообщает об успешном обновлении и результате проверки DNS (или неудаче из-за отсутствия `TEST_DOMAIN`).
      - Неудача: Сообщает о неудаче обновления (например, отсутствие wget, ошибка загрузки скрипта, ошибка выполнения) и указывает, что проверка DNS не выполнялась.
    - Примеры сообщений:
      ```
      Обновление до версии 0.3.43 выполнено успешно.
-     Проверка DNS пройдена: fakeip.podkop.net разрешено в 198.18.x.x
+     Проверка DNS пройдена: fakeip.podkop.fyi разрешено в 198.18.x.x
      ```
      ```
      Обновление до версии 0.3.43 не удалось: Ошибка выполнения скрипта обновления. Проверка DNS не выполнялась.
+     ```
+     ```
+     Обновление до версии 0.3.43 выполнено успешно.
+     Проверка DNS не удалась: Не удалось получить TEST_DOMAIN из /usr/bin/podkop.
      ```
 6. **Логирование**:
    - Все действия, включая проверку после обновления и уведомления Telegram, логируются в `/tmp/podkop_update.log`.
@@ -161,9 +172,13 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
 - **Неудачная проверка после обновления**:
   - Убедитесь, что `nslookup` доступен:
     ```sh
-    nslookup -timeout=2 fakeip.podkop.net 127.0.0.42
+    nslookup -timeout=2 $(grep 'TEST_DOMAIN=' /usr/bin/podkop | cut -d'"' -f2) 127.0.0.42
     ```
-  - Проверьте вывод `nslookup` в `/tmp/podkop_update.log`.
+  - Проверьте вывод `nslookup` в `/tmp/podkop_update.log` или ошибку "Failed to retrieve TEST_DOMAIN".
+  - Убедитесь, что `/usr/bin/podkop` существует и содержит корректный `TEST_DOMAIN`:
+    ```sh
+    grep 'TEST_DOMAIN=' /usr/bin/podkop
+    ```
   - Убедитесь, что службы `podkop` запущены и DNS настроен корректно.
   - Если IP не в диапазоне `198.18.0.0/16`, `podkop` может работать некорректно.
 - **Новая версия не обнаружена**:
@@ -191,15 +206,16 @@ Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":15
 Update requested (yes response detected)
 [output from install.sh, including package downloads and installation]
 Update script executed successfully
+Retrieving TEST_DOMAIN from /usr/bin/podkop...
 Waiting 1 minute before performing post-update DNS check...
-Running nslookup check for fakeip.podkop.net...
+Running nslookup check for fakeip.podkop.fyi...
 Server:         127.0.0.42
 Address:        127.0.0.42:53
 Non-authoritative answer:
-Name:   fakeip.podkop.net
+Name:   fakeip.podkop.fyi
 Address: 198.18.0.181
-Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
-Sent Telegram notification: Update to version 0.3.43 succeeded. DNS check passed: fakeip.podkop.net resolved to 198.18.x.x
+Post-update check passed: fakeip.podkop.fyi resolved to 198.18.x.x (podkop is working)
+Sent Telegram notification: Update to version 0.3.43 succeeded. DNS check passed: fakeip.podkop.fyi resolved to 198.18.x.x
 ```
 
 Неуспешный запуск в режиме Telegram (ошибка выполнения скрипта обновления):
@@ -219,6 +235,25 @@ Error: Update script failed
 Sent Telegram notification: Update to version 0.3.43 failed: Update script execution error. No DNS check performed.
 ```
 
+Успешный запуск в режиме Telegram с отсутствующим TEST_DOMAIN:
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Telegram API connection successful
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Sent Telegram message, ID: 1501
+Initial offset: 2
+Polling updates, offset: 2
+Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":1502,"chat":{"id":<chat_id>},"text":"yes","reply_to_message":{"message_id":1501}}}]}
+Update requested (yes response detected)
+[output from install.sh, including package downloads and installation]
+Update script executed successfully
+Retrieving TEST_DOMAIN from /usr/bin/podkop...
+Error: Failed to retrieve TEST_DOMAIN from /usr/bin/podkop
+Sent Telegram notification: Update to version 0.3.43 succeeded. DNS check failed: Could not retrieve TEST_DOMAIN from /usr/bin/podkop.
+```
+
 Успешный запуск в автоматическом режиме:
 ```
 Starting podkop update check at Fri May 2 14:00:00 UTC 2025
@@ -229,14 +264,15 @@ New version available: 0.3.43 (current: 0.3.41-1)
 Proceeding with automatic update
 [output from install.sh]
 Update script executed successfully
+Retrieving TEST_DOMAIN from /usr/bin/podkop...
 Waiting 1 minute before performing post-update DNS check...
-Running nslookup check for fakeip.podkop.net...
+Running nslookup check for fakeip.podkop.fyi...
 Server:         127.0.0.42
 Address:        127.0.0.42:53
 Non-authoritative answer:
-Name:   fakeip.podkop.net
+Name:   fakeip.podkop.fyi
 Address: 198.18.0.181
-Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
+Post-update check passed: fakeip.podkop.fyi resolved to 198.18.x.x (podkop is working)
 ```
 
 ## Лицензия
