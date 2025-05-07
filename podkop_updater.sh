@@ -149,22 +149,44 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
   fi
 
   # Step 7: Post-update check after 1 minute
-  echo "Waiting 1 minute before performing post-update DNS check..." >> $LOG_FILE
-  sleep 60
-  echo "Running nslookup check for fakeip.podkop.net..." >> $LOG_FILE
-  NSLOOKUP_OUTPUT=$(nslookup -timeout=2 fakeip.podkop.net 127.0.0.42 2>&1)
-  echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
-  DNS_CHECK_RESULT=""
-  if echo "$NSLOOKUP_OUTPUT" | grep -q "Address:.*198\.18\."; then
-    echo "Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
-    DNS_CHECK_RESULT="DNS check passed: fakeip.podkop.net resolved to 198.18.x.x"
+  echo "Retrieving TEST_DOMAIN from /usr/bin/podkop..." >> $LOG_FILE
+  TEST_DOMAIN=$(grep 'TEST_DOMAIN=' /usr/bin/podkop | cut -d'"' -f2)
+  if [ -z "$TEST_DOMAIN" ]; then
+    echo "Error: Failed to retrieve TEST_DOMAIN from /usr/bin/podkop" >> $LOG_FILE
+    if [ $FORCE_MODE -eq 0 ]; then
+      TELEGRAM_MESSAGE="Update to version $LATEST_VERSION succeeded.\nDNS check failed: Could not retrieve TEST_DOMAIN from /usr/bin/podkop."
+      SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+      if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+        echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+      else
+        echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+      fi
+    fi
   else
-    echo "Post-update check failed: fakeip.podkop.net did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
-    DNS_CHECK_RESULT="DNS check failed: fakeip.podkop.net did not resolve to 198.18.x.x or error occurred"
+    echo "Waiting 1 minute before performing post-update DNS check..." >> $LOG_FILE
+    sleep 60
+    echo "Running nslookup check for $TEST_DOMAIN..." >> $LOG_FILE
+    NSLOOKUP_OUTPUT=$(nslookup -timeout=2 "$TEST_DOMAIN" 127.0.0.42 2>&1)
+    echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
+    DNS_CHECK_RESULT=""
+    if echo "$NSLOOKUP_OUTPUT" | grep -q "Address:.*198\.18\."; then
+      echo "Post-update check passed: $TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
+      DNS_CHECK_RESULT="DNS check passed: $TEST_DOMAIN resolved to 198.18.x.x"
+    else
+      echo "Post-update check failed: $TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
+      DNS_CHECK_RESULT="DNS check failed: $TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"
+    fi
   fi
 
   # Step 8: Send Telegram notification (only in Telegram mode)
-  if [ $FORCE_MODE -eq 0 ]; then
+  if [ $FORCE_MODE -eq 0 ] && [ -n "$TELEGRAM_MESSAGE" ]; then
+    SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+    if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+      echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+    else
+      echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+    fi
+  elif [ $FORCE_MODE -eq 0 ]; then
     TELEGRAM_MESSAGE="Update to version $LATEST_VERSION succeeded.\n$DNS_CHECK_RESULT"
     SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
     if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
