@@ -1,8 +1,8 @@
-# Обновление Podkop для OpenWrt
-
 [English version](./README.md)
 
-Этот скрипт (`podkop_updater.sh`) автоматизирует проверку обновлений пакета `podkop` на маршрутизаторе OpenWrt. Поддерживаются три режима: ручное обновление через консоль, автоматическое обновление без подтверждения и автоматическое обновление с подтверждением через Telegram-бота (по умолчанию).
+# Обновление Podkop для OpenWrt
+
+Этот скрипт (`podkop_updater.sh`) автоматизирует проверку обновлений пакета `podkop` на маршрутизаторе OpenWrt или ImmortalWrt. Поддерживаются три режима: ручное обновление через консоль, автоматическое обновление без подтверждения и автоматическое обновление с подтверждением через Telegram-бота (по умолчанию).
 
 ## Возможности
 - Проверяет последнюю версию `podkop` через API GitHub.
@@ -11,24 +11,26 @@
   - **Ручной**: Запуск через консоль без cron (`/usr/bin/podkop_updater.sh`).
   - **Автоматический**: Запуск через cron без подтверждения Telegram (`--force`).
   - **Telegram**: Запуск через cron с подтверждением через Telegram-бота (по умолчанию).
-- Отправляет сообщения в Telegram для подтверждения в режиме Telegram (требуется ответ "yes" или "no").
+- Отправляет сообщения в Telegram для подтверждения, успешного или неуспешного обновления в режиме Telegram.
 - Автоматизирует ответы на запросы скрипта обновления: обновление `podkop` и установка русской локализации.
+- Выполняет проверку DNS после успешного обновления для подтверждения работоспособности `podkop`.
 - Логирует действия в `/tmp/podkop_update.log`.
 - Поддерживает регистронезависимые ответы в Telegram ("yes", "Yes", "YES" и т.д.).
 
 ## Требования
-- **Маршрутизатор OpenWrt** с доступом в интернет.
+- **Маршрутизатор OpenWrt или ImmortalWrt** с доступом в интернет.
 - **Установленные пакеты**:
   - `curl`: Для запросов к API (обычно предустановлен).
   - `jq`: Для обработки JSON (зависимость `podkop`).
   - `wget`: Для загрузки скрипта обновления.
+  - `nslookup`: Для проверки DNS после обновления (предоставляется `busybox` или `bind-tools`).
 - **Telegram-бот** (для режима Telegram):
   - Создайте бота через [@BotFather](https://t.me/BotFather) и получите токен.
   - Получите ID чата через [@get_id_bot](https://t.me/get_id_bot) или аналогичный сервис.
 - **Сетевой доступ** к:
   - API GitHub (`api.github.com`).
   - API Telegram (`api.telegram.org`) для режима Telegram.
-  - Репозиториям пакетов OpenWrt и URL скрипта обновления `podkop`.
+  - Репозиториям пакетов OpenWrt/ImmortalWrt и URL скрипта обновления `podkop`.
 
 ## Установка
 Запустите скрипт установщика одной командой:
@@ -70,16 +72,27 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
      Доступна новая версия: 0.3.43. Текущая: 0.3.41-1. Ответьте на это сообщение "yes" для обновления или "no" для отмены.
      ```
    - Ответьте **непосредственно** на сообщение "yes" для обновления или "no" для отмены.
+   - После попытки обновления вы получите сообщение в Telegram с результатом:
+     - Успех:
+       ```
+       Обновление до версии 0.3.43 выполнено успешно.
+       Проверка DNS пройдена: fakeip.podkop.net разрешено в 198.18.x.x
+       ```
+     - Неудача:
+       ```
+       Обновление до версии 0.3.43 не удалось: Ошибка выполнения скрипта обновления. Проверка DNS не выполнялась.
+       ```
    - Действия логируются в `/tmp/podkop_update.log`.
 2. **Автоматический режим (через cron)**:
    - Настраивается установщиком с параметром `--force`:
      ```sh
      /usr/bin/podkop_updater.sh --force
      ```
-   - Выполняет обновление автоматически без подтверждения Telegram.
+   - Выполняет обновление автоматически без подтверждения или уведомлений Telegram.
 3. **Режим Telegram (через cron)**:
    - Настраивается установщиком (по умолчанию).
    - Периодически запускается, отправляет сообщения в Telegram для подтверждения и ждет ответа 5 минут.
+   - Отправляет сообщение в Telegram с результатом обновления (успех или неудача).
 
 ## Как это работает
 1. **Проверка версии**:
@@ -93,12 +106,29 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
    - Автоматически отвечает на два запроса:
      - "Просто обновить podkop?" → `y`
      - "Нужен русский перевод?" → `y`
-4. **Логирование**:
-   - Все действия логируются в `/tmp/podkop_update.log`.
+4. **Проверка после обновления** (при успешном обновлении):
+   - Ждет 1 минуту после успешного обновления.
+   - Выполняет `nslookup -timeout=2 fakeip.podkop.net 127.0.0.42`.
+   - Проверяет, разрешен ли IP в диапазоне `198.18.0.0/16` (например, `198.18.0.181`).
+   - Логирует успех, если IP соответствует, или неудачу, если нет.
+5. **Уведомление Telegram** (только в режиме Telegram):
+   - Отправляется после попытки обновления:
+     - Успех: Сообщает об успешном обновлении и результате проверки DNS.
+     - Неудача: Сообщает о неудаче обновления (например, отсутствие wget, ошибка загрузки скрипта, ошибка выполнения) и указывает, что проверка DNS не выполнялась.
+   - Примеры сообщений:
+     ```
+     Обновление до версии 0.3.43 выполнено успешно.
+     Проверка DNS пройдена: fakeip.podkop.net разрешено в 198.18.x.x
+     ```
+     ```
+     Обновление до версии 0.3.43 не удалось: Ошибка выполнения скрипта обновления. Проверка DNS не выполнялась.
+     ```
+6. **Логирование**:
+   - Все действия, включая проверку после обновления и уведомления Telegram, логируются в `/tmp/podkop_update.log`.
 
 ## Устранение неполадок
 - **Сообщение Telegram не отправлено**:
-  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Cannot connect to Telegram API").
+  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Cannot connect to Telegram API" или "Failed to send Telegram notification").
   - Убедитесь в правильности `BOT_TOKEN` и `CHAT_ID`.
   - Проверьте доступ к `api.telegram.org`:
     ```sh
@@ -121,12 +151,21 @@ sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/ref
     ```sh
     echo -e "y\ny\n" | sh <(wget -O - https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh)
     ```
-  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Failed to fetch update script").
+  - Проверьте `/tmp/podkop_update.log` на наличие ошибок (например, "Failed to fetch update script", "Update script execution error").
   - Убедитесь, что `wget` установлен и на маршрутизаторе достаточно памяти/места:
     ```sh
     df -h
     free
     ```
+  - В режиме Telegram ожидайте уведомление о неудаче, например, "Обновление до версии X не удалось: Ошибка выполнения скрипта обновления."
+- **Неудачная проверка после обновления**:
+  - Убедитесь, что `nslookup` доступен:
+    ```sh
+    nslookup -timeout=2 fakeip.podkop.net 127.0.0.42
+    ```
+  - Проверьте вывод `nslookup` в `/tmp/podkop_update.log`.
+  - Убедитесь, что службы `podkop` запущены и DNS настроен корректно.
+  - Если IP не в диапазоне `198.18.0.0/16`, `podkop` может работать некорректно.
 - **Новая версия не обнаружена**:
   - Проверьте доступ к API GitHub:
     ```sh
@@ -152,6 +191,32 @@ Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":15
 Update requested (yes response detected)
 [output from install.sh, including package downloads and installation]
 Update script executed successfully
+Waiting 1 minute before performing post-update DNS check...
+Running nslookup check for fakeip.podkop.net...
+Server:         127.0.0.42
+Address:        127.0.0.42:53
+Non-authoritative answer:
+Name:   fakeip.podkop.net
+Address: 198.18.0.181
+Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
+Sent Telegram notification: Update to version 0.3.43 succeeded. DNS check passed: fakeip.podkop.net resolved to 198.18.x.x
+```
+
+Неуспешный запуск в режиме Telegram (ошибка выполнения скрипта обновления):
+```
+Starting podkop update check at Fri May 2 14:00:00 UTC 2025
+Telegram API connection successful
+Latest version: 0.3.43
+Installed version: 0.3.41-1
+New version available: 0.3.43 (current: 0.3.41-1)
+Sent Telegram message, ID: 1501
+Initial offset: 2
+Polling updates, offset: 2
+Updates response: {"ok":true,"result":[{"update_id":2,"message":{"message_id":1502,"chat":{"id":<chat_id>},"text":"yes","reply_to_message":{"message_id":1501}}}]}
+Update requested (yes response detected)
+[output from install.sh, with error]
+Error: Update script failed
+Sent Telegram notification: Update to version 0.3.43 failed: Update script execution error. No DNS check performed.
 ```
 
 Успешный запуск в автоматическом режиме:
@@ -164,6 +229,14 @@ New version available: 0.3.43 (current: 0.3.41-1)
 Proceeding with automatic update
 [output from install.sh]
 Update script executed successfully
+Waiting 1 minute before performing post-update DNS check...
+Running nslookup check for fakeip.podkop.net...
+Server:         127.0.0.42
+Address:        127.0.0.42:53
+Non-authoritative answer:
+Name:   fakeip.podkop.net
+Address: 198.18.0.181
+Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)
 ```
 
 ## Лицензия
@@ -173,4 +246,4 @@ Update script executed successfully
 Присылайте вопросы или запросы на включение изменений для улучшения скрипта. Приветствуются предложения по улучшению обработки ошибок, добавлению функций или поддержке других языков.
 
 ## Благодарности
-Разработано для автоматизации обновлений `podkop` на маршрутизаторах OpenWrt с использованием скрипта установки проекта [podkop](https://github.com/itdoginfo/podkop).
+Разработано для автоматизации обновлений `podkop` на маршрутизаторах OpenWrt и ImmortalWrt с использованием скрипта установки проекта [podkop](https://github.com/itdoginfo/podkop).

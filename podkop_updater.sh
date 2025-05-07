@@ -105,11 +105,29 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
   # Step 6: Run the update script
   if ! command -v wget >/dev/null 2>&1; then
     echo "Error: wget not installed" >> $LOG_FILE
+    if [ $FORCE_MODE -eq 0 ]; then
+      TELEGRAM_MESSAGE="Update to version $LATEST_VERSION failed: wget not installed. No DNS check performed."
+      SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+      if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+        echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+      else
+        echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+      fi
+    fi
     exit 1
   fi
   UPDATE_SCRIPT=$(wget -O - https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh 2>>$LOG_FILE)
   if [ $? -ne 0 ]; then
     echo "Error: Failed to fetch update script" >> $LOG_FILE
+    if [ $FORCE_MODE -eq 0 ]; then
+      TELEGRAM_MESSAGE="Update to version $LATEST_VERSION failed: Could not fetch update script. No DNS check performed."
+      SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+      if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+        echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+      else
+        echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+      fi
+    fi
     exit 1
   fi
   # Pipe 'y\ny\n' to answer both prompts: upgrade podkop and install Russian translation
@@ -118,7 +136,42 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
     echo "Update script executed successfully" >> $LOG_FILE
   else
     echo "Error: Update script failed" >> $LOG_FILE
+    if [ $FORCE_MODE -eq 0 ]; then
+      TELEGRAM_MESSAGE="Update to version $LATEST_VERSION failed: Update script execution error. No DNS check performed."
+      SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+      if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+        echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+      else
+        echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+      fi
+    fi
     exit 1
+  fi
+
+  # Step 7: Post-update check after 1 minute
+  echo "Waiting 1 minute before performing post-update DNS check..." >> $LOG_FILE
+  sleep 60
+  echo "Running nslookup check for fakeip.podkop.net..." >> $LOG_FILE
+  NSLOOKUP_OUTPUT=$(nslookup -timeout=2 fakeip.podkop.net 127.0.0.42 2>&1)
+  echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
+  DNS_CHECK_RESULT=""
+  if echo "$NSLOOKUP_OUTPUT" | grep -q "Address:.*198\.18\."; then
+    echo "Post-update check passed: fakeip.podkop.net resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
+    DNS_CHECK_RESULT="DNS check passed: fakeip.podkop.net resolved to 198.18.x.x"
+  else
+    echo "Post-update check failed: fakeip.podkop.net did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
+    DNS_CHECK_RESULT="DNS check failed: fakeip.podkop.net did not resolve to 198.18.x.x or error occurred"
+  fi
+
+  # Step 8: Send Telegram notification (only in Telegram mode)
+  if [ $FORCE_MODE -eq 0 ]; then
+    TELEGRAM_MESSAGE="Update to version $LATEST_VERSION succeeded.\n$DNS_CHECK_RESULT"
+    SEND_RESPONSE=$(curl -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" -d chat_id=$CHAT_ID -d text="$TELEGRAM_MESSAGE")
+    if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+      echo "Sent Telegram notification: $TELEGRAM_MESSAGE" >> $LOG_FILE
+    else
+      echo "Error: Failed to send Telegram notification" >> $LOG_FILE
+    fi
   fi
 else
   echo "No new version available" >> $LOG_FILE
