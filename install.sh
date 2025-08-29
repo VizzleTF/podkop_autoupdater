@@ -3,15 +3,62 @@
 # Installer script for podkop_updater.sh
 # Downloads, configures, and optionally schedules podkop_updater.sh on OpenWrt
 
-# URLs and paths
-UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh"
-UPDATER_PATH="/usr/bin/podkop_updater.sh"
-LOG_FILE="/tmp/podkop_update.log"
+# Constants
+UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh"  # URL to download the updater script
+UPDATER_PATH="/usr/bin/podkop_updater.sh"  # Installation path for the updater script
+LOG_FILE="/tmp/podkop_update.log"  # Log file for update operations
+DEFAULT_BOT_TOKEN="your_bot_token"  # Default placeholder for Telegram bot token
+DEFAULT_CHAT_ID="your_chat_id"  # Default placeholder for Telegram chat ID
+DEFAULT_CRON_HOURS=1  # Default cron interval in hours
+TOKEN_DISPLAY_LENGTH=10  # Number of characters to show when displaying bot token
+TEMP_UPDATER_PATH="/tmp/podkop_updater_new.sh"  # Temporary path for downloaded updater script
+CRON_FILE="/etc/crontabs/root"  # Path to root crontab file
+OS_RELEASE_FILE="/etc/os-release"  # System OS release information file
+GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"  # GitHub API URL for latest podkop release
+TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot API
+CRON_SERVICE="/etc/init.d/cron"  # Cron service control script
+
+# Functions
+exit_with_error() {
+  local message="$1"
+  echo "Error: $message"
+  exit 1
+}
+
+download_file() {
+  local url="$1"
+  local output_path="$2"
+  wget -O "$output_path" "$url" > /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    exit_with_error "Failed to download from $url. Please check your internet connection."
+  fi
+}
+
+setup_cron_job() {
+  local cron_hours="$1"
+  local updater_command="$2"
+  echo "Setting up cron job to run every $cron_hours hour(s)..."
+  if [ ! -f "$CRON_FILE" ]; then
+    touch "$CRON_FILE"
+  fi
+  sed -i "/podkop_updater.sh/d" "$CRON_FILE"
+  echo "0 */$cron_hours * * * $updater_command" >> "$CRON_FILE"
+  $CRON_SERVICE restart > /dev/null 2>&1
+}
+
+validate_cron_hours() {
+  local hours="$1"
+  if ! echo "$hours" | grep -q '^[0-9]\+$' || [ "$hours" -lt 1 ]; then
+    echo "Error: Invalid input. Using default of $DEFAULT_CRON_HOURS hour."
+    echo $DEFAULT_CRON_HOURS
+  else
+    echo "$hours"
+  fi
+}
 
 # Step 1: Check if running on OpenWrt
-if ! grep -q -e "OpenWrt" -e "immortalwrt" /etc/os-release; then
-  echo "Error: This script is designed for OpenWrt or ImmortalWrt. Exiting."
-  exit 1
+if ! grep -q -e "OpenWrt" -e "immortalwrt" $OS_RELEASE_FILE; then
+  exit_with_error "This script is designed for OpenWrt or ImmortalWrt. Exiting."
 fi
 
 # Step 2: Install dependencies
@@ -21,8 +68,7 @@ for pkg in curl jq wget; do
   if ! opkg list-installed | grep -q "^$pkg "; then
     opkg install $pkg > /dev/null 2>&1
     if [ $? -ne 0 ]; then
-      echo "Error: Failed to install $pkg. Please check your internet connection and opkg repositories."
-      exit 1
+      exit_with_error "Failed to install $pkg. Please check your internet connection and opkg repositories."
     fi
   fi
 done
@@ -36,9 +82,9 @@ if [ -f "$UPDATER_PATH" ]; then
   EXISTING_BOT_TOKEN=$(grep '^BOT_TOKEN=' $UPDATER_PATH | cut -d'"' -f2)
   EXISTING_CHAT_ID=$(grep '^CHAT_ID=' $UPDATER_PATH | cut -d'"' -f2)
   
-  if [ "$EXISTING_BOT_TOKEN" != "your_bot_token" ] && [ "$EXISTING_CHAT_ID" != "your_chat_id" ]; then
+  if [ "$EXISTING_BOT_TOKEN" != "$DEFAULT_BOT_TOKEN" ] && [ "$EXISTING_CHAT_ID" != "$DEFAULT_CHAT_ID" ]; then
     echo "Script is already configured with:"
-    echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:10}..."
+    echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:$TOKEN_DISPLAY_LENGTH}..."
     echo "  Chat ID: $EXISTING_CHAT_ID"
     echo ""
     echo "Choose an option:"
@@ -55,15 +101,11 @@ if [ -f "$UPDATER_PATH" ]; then
       3)
         echo "Updating script while preserving configuration..."
         # Download new version but preserve config
-        wget -O /tmp/podkop_updater_new.sh $UPDATER_URL > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-          echo "Error: Failed to download updated podkop_updater.sh. Please check your internet connection."
-          exit 1
-        fi
+        download_file $UPDATER_URL $TEMP_UPDATER_PATH
         # Replace config in new version with existing values
-        sed -i "s|BOT_TOKEN=\"your_bot_token\"|BOT_TOKEN=\"$EXISTING_BOT_TOKEN\"|" /tmp/podkop_updater_new.sh
-        sed -i "s|CHAT_ID=\"your_chat_id\"|CHAT_ID=\"$EXISTING_CHAT_ID\"|" /tmp/podkop_updater_new.sh
-        mv /tmp/podkop_updater_new.sh $UPDATER_PATH
+        sed -i "s|BOT_TOKEN=\"$DEFAULT_BOT_TOKEN\"|BOT_TOKEN=\"$EXISTING_BOT_TOKEN\"|" $TEMP_UPDATER_PATH
+        sed -i "s|CHAT_ID=\"$DEFAULT_CHAT_ID\"|CHAT_ID=\"$EXISTING_CHAT_ID\"|" $TEMP_UPDATER_PATH
+        mv $TEMP_UPDATER_PATH $UPDATER_PATH
         chmod +x $UPDATER_PATH
         echo "Script updated with preserved configuration."
         echo "Installation complete! The script is ready to use."
@@ -79,11 +121,7 @@ fi
 
 # Download podkop_updater.sh
 echo "Downloading podkop_updater.sh from $UPDATER_URL..."
-wget -O $UPDATER_PATH $UPDATER_URL > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  echo "Error: Failed to download podkop_updater.sh. Please check your internet connection."
-  exit 1
-fi
+download_file $UPDATER_URL $UPDATER_PATH
 chmod +x $UPDATER_PATH
 echo "Downloaded and set executable: $UPDATER_PATH"
 
@@ -103,19 +141,9 @@ case "$UPDATE_MODE" in
     # Prompt for cron frequency
     echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
     read -r CRON_HOURS
-    if ! echo "$CRON_HOURS" | grep -q '^[0-9]\+$' || [ "$CRON_HOURS" -lt 1 ]; then
-      echo "Error: Invalid input. Using default of 1 hour."
-      CRON_HOURS=1
-    fi
+    CRON_HOURS=$(validate_cron_hours "$CRON_HOURS")
     # Configure cron job
-    echo "Setting up cron job to run every $CRON_HOURS hour(s)..."
-    CRON_FILE="/etc/crontabs/root"
-    if [ ! -f "$CRON_FILE" ]; then
-      touch "$CRON_FILE"
-    fi
-    sed -i "/podkop_updater.sh/d" "$CRON_FILE"
-    echo "0 */$CRON_HOURS * * * $UPDATER_PATH --force" >> "$CRON_FILE"
-    /etc/init.d/cron restart > /dev/null 2>&1
+    setup_cron_job "$CRON_HOURS" "$UPDATER_PATH --force"
     echo "Cron job configured for automatic updates."
     ;;
   3|*)
@@ -124,51 +152,38 @@ case "$UPDATE_MODE" in
     echo "Please enter your Telegram bot token (obtained from @BotFather):"
     read -r BOT_TOKEN
     if [ -z "$BOT_TOKEN" ]; then
-      echo "Error: Bot token cannot be empty. Exiting."
-      exit 1
+      exit_with_error "Bot token cannot be empty. Exiting."
     fi
     # Prompt for Telegram chat ID
     echo "Please enter your Telegram chat ID (obtained from @get_id_bot or similar):"
     read -r CHAT_ID
     if [ -z "$CHAT_ID" ]; then
-      echo "Error: Chat ID cannot be empty. Exiting."
-      exit 1
+      exit_with_error "Chat ID cannot be empty. Exiting."
     fi
     # Configure podkop_updater.sh
     echo "Configuring podkop_updater.sh with bot token and chat ID..."
-    sed -i "s|BOT_TOKEN=\"your_bot_token\"|BOT_TOKEN=\"$BOT_TOKEN\"|" $UPDATER_PATH
-    sed -i "s|CHAT_ID=\"your_chat_id\"|CHAT_ID=\"$CHAT_ID\"|" $UPDATER_PATH
+    sed -i "s|BOT_TOKEN=\"$DEFAULT_BOT_TOKEN\"|BOT_TOKEN=\"$BOT_TOKEN\"|" $UPDATER_PATH
+    sed -i "s|CHAT_ID=\"$DEFAULT_CHAT_ID\"|CHAT_ID=\"$CHAT_ID\"|" $UPDATER_PATH
     if ! grep -q "BOT_TOKEN=\"$BOT_TOKEN\"" $UPDATER_PATH || ! grep -q "CHAT_ID=\"$CHAT_ID\"" $UPDATER_PATH; then
-      echo "Error: Failed to configure podkop_updater.sh. Please check the script file."
-      exit 1
+      exit_with_error "Failed to configure podkop_updater.sh. Please check the script file."
     fi
     # Prompt for cron frequency
     echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
     read -r CRON_HOURS
-    if ! echo "$CRON_HOURS" | grep -q '^[0-9]\+$' || [ "$CRON_HOURS" -lt 1 ]; then
-      echo "Error: Invalid input. Using default of 1 hour."
-      CRON_HOURS=1
-    fi
+    CRON_HOURS=$(validate_cron_hours "$CRON_HOURS")
     # Configure cron job
-    echo "Setting up cron job to run every $CRON_HOURS hour(s)..."
-    CRON_FILE="/etc/crontabs/root"
-    if [ ! -f "$CRON_FILE" ]; then
-      touch "$CRON_FILE"
-    fi
-    sed -i "/podkop_updater.sh/d" "$CRON_FILE"
-    echo "0 */$CRON_HOURS * * * $UPDATER_PATH" >> "$CRON_FILE"
-    /etc/init.d/cron restart > /dev/null 2>&1
+    setup_cron_job "$CRON_HOURS" "$UPDATER_PATH"
     echo "Cron job configured for Telegram-confirmed updates."
     ;;
 esac
 
 # Step 5: Verify network access
 echo "Verifying network access to GitHub and Telegram APIs..."
-if ! curl -s https://api.github.com/repos/itdoginfo/podkop/releases/latest > /dev/null; then
+if ! curl -s $GITHUB_API_URL > /dev/null; then
   echo "Warning: Cannot reach GitHub API. The script may fail to check for updates."
 fi
 if [ "$UPDATE_MODE" = "3" ] || [ -z "$UPDATE_MODE" ]; then
-  if ! curl -s "https://api.telegram.org/bot$BOT_TOKEN/getMe" | grep -q '"ok":true'; then
+  if ! curl -s "${TELEGRAM_API_BASE}$BOT_TOKEN/getMe" | grep -q '"ok":true'; then
     echo "Warning: Cannot reach Telegram API or invalid bot token. The script may fail to send notifications."
   fi
 fi
