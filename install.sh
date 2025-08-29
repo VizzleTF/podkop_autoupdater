@@ -28,7 +28,56 @@ for pkg in curl jq wget; do
 done
 echo "Dependencies installed."
 
-# Step 3: Download podkop_updater.sh
+# Step 3: Check if podkop_updater.sh already exists and is configured
+if [ -f "$UPDATER_PATH" ]; then
+  echo "Found existing podkop_updater.sh at $UPDATER_PATH"
+  
+  # Check if it's already configured (not default values)
+  EXISTING_BOT_TOKEN=$(grep '^BOT_TOKEN=' $UPDATER_PATH | cut -d'"' -f2)
+  EXISTING_CHAT_ID=$(grep '^CHAT_ID=' $UPDATER_PATH | cut -d'"' -f2)
+  
+  if [ "$EXISTING_BOT_TOKEN" != "your_bot_token" ] && [ "$EXISTING_CHAT_ID" != "your_chat_id" ]; then
+    echo "Script is already configured with:"
+    echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:10}..."
+    echo "  Chat ID: $EXISTING_CHAT_ID"
+    echo ""
+    echo "Choose an option:"
+    echo "1) Keep existing configuration and exit"
+    echo "2) Reconfigure with new settings"
+    echo "3) Update script but keep existing configuration"
+    echo "Enter 1, 2, or 3 (default: 1):"
+    read -r EXISTING_CONFIG_CHOICE
+    
+    case "$EXISTING_CONFIG_CHOICE" in
+      2)
+        echo "Reconfiguring with new settings..."
+        ;;
+      3)
+        echo "Updating script while preserving configuration..."
+        # Download new version but preserve config
+        wget -O /tmp/podkop_updater_new.sh $UPDATER_URL > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+          echo "Error: Failed to download updated podkop_updater.sh. Please check your internet connection."
+          exit 1
+        fi
+        # Replace config in new version with existing values
+        sed -i "s|BOT_TOKEN=\"your_bot_token\"|BOT_TOKEN=\"$EXISTING_BOT_TOKEN\"|" /tmp/podkop_updater_new.sh
+        sed -i "s|CHAT_ID=\"your_chat_id\"|CHAT_ID=\"$EXISTING_CHAT_ID\"|" /tmp/podkop_updater_new.sh
+        mv /tmp/podkop_updater_new.sh $UPDATER_PATH
+        chmod +x $UPDATER_PATH
+        echo "Script updated with preserved configuration."
+        echo "Installation complete! The script is ready to use."
+        exit 0
+        ;;
+      1|*)
+        echo "Keeping existing configuration. Installation complete!"
+        exit 0
+        ;;
+    esac
+  fi
+fi
+
+# Download podkop_updater.sh
 echo "Downloading podkop_updater.sh from $UPDATER_URL..."
 wget -O $UPDATER_PATH $UPDATER_URL > /dev/null 2>&1
 if [ $? -ne 0 ]; then
