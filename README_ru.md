@@ -26,7 +26,7 @@
   - `nslookup`: Для проверки DNS после обновления (предоставляется `busybox` или `bind-tools`).
 - **Telegram-бот** (для режима Telegram):
   - Создайте бота через [@BotFather](https://t.me/BotFather) и получите токен.
-  - Получите ID чата через [@get_id_bot](https://t.me/get_id_bot) или аналогичный сервис.
+  - Получите ID чата через [@get_id_bot](https://t.me/getmyid_bot) или аналогичный сервис.
 - **Сетевой доступ** к:
   - API GitHub (`api.github.com`).
   - API Telegram (`api.telegram.org`) для режима Telegram.
