@@ -26,7 +26,7 @@ This script (`podkop_updater.sh`) automates checking for updates to the `podkop`
   - `nslookup`: For post-update DNS check (provided by `busybox` or `bind-tools`).
 - **Telegram bot** (for Telegram mode):
   - Create a bot via [@BotFather](https://t.me/BotFather) and obtain a token.
-  - Get your chat ID via [@get_id_bot](https://t.me/get_id_bot) or similar.
+  - Get your chat ID via [@get_id_bot](https://t.me/getmyid_bot) or similar.
 - **Network access** to:
   - GitHub API (`api.github.com`).
   - Telegram API (`api.telegram.org`) for Telegram mode.
