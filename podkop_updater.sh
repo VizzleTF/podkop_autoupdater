@@ -6,7 +6,13 @@ CHAT_ID="your_chat_id"
 
 # Log file for debugging
 LOG_FILE="/tmp/podkop_update.log"
-echo "Starting podkop update check at $(date)" >> $LOG_FILE
+
+# Log rotation: keep only last 100 lines if file gets too large
+if [ -f "$LOG_FILE" ] && [ $(wc -l < "$LOG_FILE" 2>/dev/null || echo 0) -gt 50 ]; then
+  tail -n 20 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+fi
+
+# Starting update check - will log result at the end
 
 # Step 1: Check for --force parameter (automatic mode without Telegram)
 FORCE_MODE=0
@@ -23,18 +29,16 @@ if [ -z "$LATEST_RELEASE" ]; then
 fi
 LATEST_VERSION=$(echo $LATEST_RELEASE | jq -r '.tag_name')
 LATEST_VERSION=${LATEST_VERSION#v}  # Remove "v" prefix if present
-echo "Latest version: $LATEST_VERSION" >> $LOG_FILE
 
 # Step 3: Get the installed version on the router
 INSTALLED_INFO=$(opkg info podkop)
 INSTALLED_VERSION=$(echo "$INSTALLED_INFO" | grep '^Version:' | cut -d' ' -f2)
 INSTALLED_MAIN_VERSION=${INSTALLED_VERSION%-*}  # Remove package revision (e.g., "-1")
 INSTALLED_MAIN_VERSION=${INSTALLED_MAIN_VERSION#v}  # Remove "v" prefix if present
-echo "Installed version: $INSTALLED_VERSION" >> $LOG_FILE
 
 # Step 4: Compare versions
 if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | tail -n1)" = "$LATEST_VERSION" ] && [ "$INSTALLED_MAIN_VERSION" != "$LATEST_VERSION" ]; then
-  echo "New version available: $LATEST_VERSION (current: $INSTALLED_VERSION)" >> $LOG_FILE
+  echo "Update check at $(date) - New version available: $LATEST_VERSION (current: $INSTALLED_VERSION)" >> $LOG_FILE
 
   # Step 5: Handle update based on mode
   if [ $FORCE_MODE -eq 1 ]; then
@@ -197,5 +201,5 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
     fi
   fi
 else
-  echo "No new version available" >> $LOG_FILE
+  echo "Update check at $(date) - No new version" >> $LOG_FILE
 fi
