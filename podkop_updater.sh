@@ -13,31 +13,6 @@ FORCE_MODE=0
 if [ "$1" = "--force" ]; then
   FORCE_MODE=1
   echo "Running in force mode (automatic update without Telegram)" >> $LOG_FILE
-else
-  # Step 1.1: Check if Telegram settings are configured
-  if [ "$BOT_TOKEN" = "your_bot_token" ] || [ "$CHAT_ID" = "your_chat_id" ]; then
-    echo "Telegram settings not configured. Please enter your settings:"
-    printf "Enter Bot Token: "
-    read BOT_TOKEN
-    printf "Enter Chat ID: "
-    read CHAT_ID
-    echo "Settings configured for this session" >> $LOG_FILE
-  else
-    echo "Current Telegram settings:"
-    echo "Bot Token: ${BOT_TOKEN:0:10}..."
-    echo "Chat ID: $CHAT_ID"
-    printf "Use existing settings? (y/n): "
-    read USE_EXISTING
-    if [ "$USE_EXISTING" != "y" ] && [ "$USE_EXISTING" != "Y" ]; then
-      printf "Enter new Bot Token: "
-      read BOT_TOKEN
-      printf "Enter new Chat ID: "
-      read CHAT_ID
-      echo "Settings reconfigured for this session" >> $LOG_FILE
-    else
-      echo "Using existing settings" >> $LOG_FILE
-    fi
-  fi
 fi
 
 # Step 2: Fetch the latest version from GitHub
