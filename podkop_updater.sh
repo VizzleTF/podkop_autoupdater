@@ -170,7 +170,7 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
   # Step 7: Post-update check after delay
   echo "Loading constants from $PODKOP_CONSTANTS..." >> $LOG_FILE
   if [ -f "$PODKOP_CONSTANTS" ]; then
-    eval $(grep -v '^#' "$PODKOP_CONSTANTS" | grep '=')
+    . "$PODKOP_CONSTANTS"
   fi
   echo "Waiting $DNS_CHECK_DELAY seconds before performing post-update DNS check..." >> $LOG_FILE
   sleep $DNS_CHECK_DELAY  # Wait for podkop service to restart after update
