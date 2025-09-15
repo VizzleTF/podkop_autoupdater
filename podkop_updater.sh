@@ -19,7 +19,7 @@ UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads
 TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot API
 TEMP_TELEGRAM_FILE="/tmp/telegram_test.json"  # Temporary file for Telegram API tests
 PODKOP_BINARY="/usr/bin/podkop"  # Path to podkop binary
-PODKOP_CONSTANTS="/usr/lib/constants.sh"
+PODKOP_CONSTANTS="/usr/lib/podkop/constants.sh"
 DNS_SERVER="127.0.0.42"  # Local DNS server for testing
 EXPECTED_DNS_PATTERN="Address:.*198\.18\."  # Expected DNS response pattern for podkop functionality
 
