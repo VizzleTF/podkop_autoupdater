@@ -20,6 +20,7 @@ TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot AP
 TEMP_TELEGRAM_FILE="/tmp/telegram_test.json"  # Temporary file for Telegram API tests
 PODKOP_BINARY="/usr/bin/podkop"  # Path to podkop binary
 PODKOP_CONSTANTS="/usr/lib/podkop/constants.sh"
+FAKEIP_TEST_DOMAIN="fakeip.podkop.fyi"  # Default test domain, can be overridden from constants
 DNS_SERVER="127.0.0.42"  # Local DNS server for testing
 EXPECTED_DNS_PATTERN="Address:.*198\.18\."  # Expected DNS response pattern for podkop functionality
 
@@ -167,27 +168,22 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
   fi
 
   # Step 7: Post-update check after delay
-  echo "Retrieving FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS..." >> $LOG_FILE
-  FAKEIP_TEST_DOMAIN=$(grep 'FAKEIP_TEST_DOMAIN=' $PODKOP_CONSTANTS | cut -d'"' -f2)  # Extract test domain from podkop binary
-  if [ -z "$FAKEIP_TEST_DOMAIN" ]; then
-    echo "Error: Failed to retrieve FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS" >> $LOG_FILE
-    if [ $FORCE_MODE -eq 0 ]; then
-      send_telegram_message "Update to version $LATEST_VERSION succeeded.\nDNS check failed: Could not retrieve FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS."
-    fi
+  echo "Loading constants from $PODKOP_CONSTANTS..." >> $LOG_FILE
+  if [ -f "$PODKOP_CONSTANTS" ]; then
+    eval $(grep -v '^#' "$PODKOP_CONSTANTS" | grep '=')
+  fi
+  echo "Waiting $DNS_CHECK_DELAY seconds before performing post-update DNS check..." >> $LOG_FILE
+  sleep $DNS_CHECK_DELAY  # Wait for podkop service to restart after update
+  echo "Running nslookup check for $FAKEIP_TEST_DOMAIN..." >> $LOG_FILE
+  NSLOOKUP_OUTPUT=$(nslookup -timeout=$DNS_TIMEOUT "$FAKEIP_TEST_DOMAIN" $DNS_SERVER 2>&1)  # DNS lookup output with timeout
+  echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
+  DNS_CHECK_RESULT=""  # Result message for DNS check
+  if echo "$NSLOOKUP_OUTPUT" | grep -q "$EXPECTED_DNS_PATTERN"; then
+    echo "Post-update check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
+    DNS_CHECK_RESULT="DNS check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x"  # Success message for DNS check
   else
-    echo "Waiting $DNS_CHECK_DELAY seconds before performing post-update DNS check..." >> $LOG_FILE
-    sleep $DNS_CHECK_DELAY  # Wait for podkop service to restart after update
-    echo "Running nslookup check for $FAKEIP_TEST_DOMAIN..." >> $LOG_FILE
-    NSLOOKUP_OUTPUT=$(nslookup -timeout=$DNS_TIMEOUT "$FAKEIP_TEST_DOMAIN" $DNS_SERVER 2>&1)  # DNS lookup output with timeout
-    echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
-    DNS_CHECK_RESULT=""  # Result message for DNS check
-    if echo "$NSLOOKUP_OUTPUT" | grep -q "$EXPECTED_DNS_PATTERN"; then
-      echo "Post-update check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
-      DNS_CHECK_RESULT="DNS check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x"  # Success message for DNS check
-    else
-      echo "Post-update check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
-      DNS_CHECK_RESULT="DNS check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"  # Failure message for DNS check
-    fi
+    echo "Post-update check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
+    DNS_CHECK_RESULT="DNS check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"  # Failure message for DNS check
   fi
 
   # Step 8: Send Telegram notification (only in Telegram mode)
