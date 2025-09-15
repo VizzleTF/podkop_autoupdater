@@ -19,6 +19,7 @@ UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads
 TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot API
 TEMP_TELEGRAM_FILE="/tmp/telegram_test.json"  # Temporary file for Telegram API tests
 PODKOP_BINARY="/usr/bin/podkop"  # Path to podkop binary
+PODKOP_CONSTANTS="/usr/lib/constants.sh"
 DNS_SERVER="127.0.0.42"  # Local DNS server for testing
 EXPECTED_DNS_PATTERN="Address:.*198\.18\."  # Expected DNS response pattern for podkop functionality
 
@@ -166,26 +167,26 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
   fi
 
   # Step 7: Post-update check after delay
-  echo "Retrieving TEST_DOMAIN from $PODKOP_BINARY..." >> $LOG_FILE
-  TEST_DOMAIN=$(grep 'TEST_DOMAIN=' $PODKOP_BINARY | cut -d'"' -f2)  # Extract test domain from podkop binary
-  if [ -z "$TEST_DOMAIN" ]; then
-    echo "Error: Failed to retrieve TEST_DOMAIN from $PODKOP_BINARY" >> $LOG_FILE
+  echo "Retrieving FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS..." >> $LOG_FILE
+  FAKEIP_TEST_DOMAIN=$(grep 'FAKEIP_TEST_DOMAIN=' $PODKOP_CONSTANTS | cut -d'"' -f2)  # Extract test domain from podkop binary
+  if [ -z "$FAKEIP_TEST_DOMAIN" ]; then
+    echo "Error: Failed to retrieve FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS" >> $LOG_FILE
     if [ $FORCE_MODE -eq 0 ]; then
-      send_telegram_message "Update to version $LATEST_VERSION succeeded.\nDNS check failed: Could not retrieve TEST_DOMAIN from $PODKOP_BINARY."
+      send_telegram_message "Update to version $LATEST_VERSION succeeded.\nDNS check failed: Could not retrieve FAKEIP_TEST_DOMAIN from $PODKOP_CONSTANTS."
     fi
   else
     echo "Waiting $DNS_CHECK_DELAY seconds before performing post-update DNS check..." >> $LOG_FILE
     sleep $DNS_CHECK_DELAY  # Wait for podkop service to restart after update
-    echo "Running nslookup check for $TEST_DOMAIN..." >> $LOG_FILE
-    NSLOOKUP_OUTPUT=$(nslookup -timeout=$DNS_TIMEOUT "$TEST_DOMAIN" $DNS_SERVER 2>&1)  # DNS lookup output with timeout
+    echo "Running nslookup check for $FAKEIP_TEST_DOMAIN..." >> $LOG_FILE
+    NSLOOKUP_OUTPUT=$(nslookup -timeout=$DNS_TIMEOUT "$FAKEIP_TEST_DOMAIN" $DNS_SERVER 2>&1)  # DNS lookup output with timeout
     echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
     DNS_CHECK_RESULT=""  # Result message for DNS check
     if echo "$NSLOOKUP_OUTPUT" | grep -q "$EXPECTED_DNS_PATTERN"; then
-      echo "Post-update check passed: $TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
-      DNS_CHECK_RESULT="DNS check passed: $TEST_DOMAIN resolved to 198.18.x.x"  # Success message for DNS check
+      echo "Post-update check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
+      DNS_CHECK_RESULT="DNS check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x"  # Success message for DNS check
     else
-      echo "Post-update check failed: $TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
-      DNS_CHECK_RESULT="DNS check failed: $TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"  # Failure message for DNS check
+      echo "Post-update check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
+      DNS_CHECK_RESULT="DNS check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"  # Failure message for DNS check
     fi
   fi
 
@@ -194,7 +195,7 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
     if [ -n "$DNS_CHECK_RESULT" ]; then
       send_telegram_message "Update to version $LATEST_VERSION completed successfully.\n$DNS_CHECK_RESULT"
     else
-      send_telegram_message "Update to version $LATEST_VERSION completed successfully.\nDNS check was skipped due to TEST_DOMAIN retrieval failure."
+      send_telegram_message "Update to version $LATEST_VERSION completed successfully.\nDNS check was skipped due to FAKEIP_TEST_DOMAIN retrieval failure."
     fi
   fi
 else
