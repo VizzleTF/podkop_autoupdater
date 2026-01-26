@@ -32,7 +32,8 @@ fi
 # Functions
 send_telegram_message() {
   local message="$1"
-  SEND_RESPONSE=$(curl -X POST "${TELEGRAM_API_BASE}${BOT_TOKEN}/sendMessage" -d chat_id=$CHAT_ID -d text="$message")
+  local formatted_message=$(printf '%b' "$message")
+  SEND_RESPONSE=$(curl -X POST "${TELEGRAM_API_BASE}${BOT_TOKEN}/sendMessage" -d chat_id=$CHAT_ID --data-urlencode "text=$formatted_message")
   if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
     echo "Sent Telegram notification: $message" >> $LOG_FILE
     return 0
@@ -49,9 +50,49 @@ log_and_exit() {
   exit $exit_code
 }
 
+test_telegram() {
+  local test_message="${1:-Podkop updater test message: Telegram notifications are working!}"
+
+  echo "Testing Telegram connection..." >> $LOG_FILE
+
+  if [ "$BOT_TOKEN" = "your_bot_token" ] || [ "$CHAT_ID" = "your_chat_id" ]; then
+    echo "Error: BOT_TOKEN or CHAT_ID not configured"
+    echo "Error: BOT_TOKEN or CHAT_ID not configured" >> $LOG_FILE
+    return 1
+  fi
+
+  echo "Checking Telegram API connectivity..."
+  API_RESPONSE=$(curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getMe")
+  if echo "$API_RESPONSE" | grep -q '"ok":true'; then
+    BOT_NAME=$(echo "$API_RESPONSE" | jq -r '.result.username')
+    echo "API connection successful. Bot: @$BOT_NAME"
+    echo "API connection successful. Bot: @$BOT_NAME" >> $LOG_FILE
+  else
+    echo "Error: Cannot connect to Telegram API"
+    echo "Response: $API_RESPONSE"
+    echo "Error: Cannot connect to Telegram API. Response: $API_RESPONSE" >> $LOG_FILE
+    return 1
+  fi
+
+  echo "Sending test message to chat $CHAT_ID..."
+  if send_telegram_message "$test_message"; then
+    echo "Test message sent successfully!"
+    return 0
+  else
+    echo "Error: Failed to send test message"
+    return 1
+  fi
+}
+
 # Starting update check - will log result at the end
 
-# Step 1: Check for --force parameter (automatic mode without Telegram)
+# Step 1: Check for --test-telegram parameter (test mode)
+if [ "$1" = "--test-telegram" ]; then
+  test_telegram "$2"
+  exit $?
+fi
+
+# Step 2: Check for --force parameter (automatic mode without Telegram)
 FORCE_MODE=0  # Flag for force mode (0=Telegram mode, 1=automatic mode)
 if [ "$1" = "--force" ]; then
   FORCE_MODE=1
@@ -109,7 +150,7 @@ if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | ta
       GET_UPDATES=$(curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getUpdates?offset=$OFFSET")  # Poll for new updates
       echo "Polling updates, offset: $OFFSET" >> $LOG_FILE
       echo "Updates response: $GET_UPDATES" >> $LOG_FILE
-      
+
       # Check for "yes" response (case-insensitive)
       YES_ID=$(echo $GET_UPDATES | jq -r --arg msgid "$MESSAGE_ID" '.result[] | select(.message.reply_to_message != null) | select(.message.reply_to_message.message_id == ($msgid | tonumber)) | select(.message.text | ascii_downcase == "yes") | .update_id')  # Extract update ID if yes reply found
       if [ -n "$YES_ID" ]; then
