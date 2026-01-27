@@ -1,240 +1,233 @@
 #!/bin/ash
 
-# Configuration: Specify the Telegram bot token and chat ID (used only in Telegram mode)
-BOT_TOKEN="your_bot_token"  # Telegram bot token from @BotFather
-CHAT_ID="your_chat_id"  # Telegram chat ID for notifications
+# =============================================================================
+# Podkop Auto-Updater Script
+# Modes: Telegram (default) - waits for confirmation, Force (--force) - auto
+# =============================================================================
 
-# Log file for debugging
-LOG_FILE="/tmp/podkop_update.log"  # Path to log file for update operations
+# Configuration
+BOT_TOKEN="your_bot_token"
+CHAT_ID="your_chat_id"
 
-# Constants
-LOG_MAX_LINES=200  # Maximum lines in log file before rotation
-LOG_KEEP_LINES=100  # Lines to keep after log rotation
-POLL_TIMEOUT=300  # Telegram response timeout in seconds (5 minutes)
-POLL_INTERVAL=5  # Polling interval for Telegram updates in seconds
-DNS_CHECK_DELAY=60  # Delay before DNS check after update in seconds
-DNS_TIMEOUT=2  # DNS lookup timeout in seconds
-GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"  # GitHub API URL for latest podkop release
-UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"  # URL for podkop update script
-TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot API
-TEMP_TELEGRAM_FILE="/tmp/telegram_test.json"  # Temporary file for Telegram API tests
-PODKOP_BINARY="/usr/bin/podkop"  # Path to podkop binary
+# Log Settings
+LOG_FILE="/tmp/podkop_update.log"
+LOG_MAX_LINES=200
+LOG_KEEP_LINES=100
+
+# Timeouts
+POLL_TIMEOUT=300
+DNS_CHECK_DELAY=60
+DNS_TIMEOUT=2
+CURL_TIMEOUT=30
+LONG_POLL_TIMEOUT=60
+
+# URLs and Paths
+GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
+TELEGRAM_API_BASE="https://api.telegram.org/bot"
 PODKOP_CONSTANTS="/usr/lib/podkop/constants.sh"
-FAKEIP_TEST_DOMAIN="fakeip.podkop.fyi"  # Default test domain, can be overridden from constants
-DNS_SERVER="127.0.0.42"  # Local DNS server for testing
-EXPECTED_DNS_PATTERN="Address:.*198\.18\."  # Expected DNS response pattern for podkop functionality
 
-# Log rotation: keep only last lines if file gets too large
+# DNS Check Settings
+FAKEIP_TEST_DOMAIN="fakeip.podkop.fyi"
+DNS_SERVER="127.0.0.42"
+EXPECTED_DNS_PATTERN="Address:.*198\.18\."
+
+# Validation
+VERSION_PATTERN="^[0-9]+\.[0-9]+\.[0-9]+$"
+
+# =============================================================================
+# Initialization
+# =============================================================================
+
+cleanup() { rm -f "${LOG_FILE}.tmp"; }
+trap cleanup EXIT
+
+for cmd in curl jq wget nslookup; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "Error: '$cmd' not found" | tee -a "$LOG_FILE"; exit 1; }
+done
+
 if [ -f "$LOG_FILE" ] && [ $(wc -l < "$LOG_FILE" 2>/dev/null || echo 0) -gt $LOG_MAX_LINES ]; then
   tail -n $LOG_KEEP_LINES "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 fi
 
-# Functions
-send_telegram_message() {
-  local message="$1"
-  local formatted_message=$(printf '%b' "$message")
-  SEND_RESPONSE=$(curl -X POST "${TELEGRAM_API_BASE}${BOT_TOKEN}/sendMessage" -d chat_id=$CHAT_ID --data-urlencode "text=$formatted_message")
-  if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
-    echo "Sent Telegram notification: $message" >> $LOG_FILE
-    return 0
-  else
-    echo "Error: Failed to send Telegram notification" >> $LOG_FILE
-    return 1
-  fi
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+log() { echo "$1" >> "$LOG_FILE"; }
+log_tee() { echo "$1" | tee -a "$LOG_FILE"; }
+log_exit() { log "$1"; exit "${2:-1}"; }
+
+handle_error() {
+  log "Error: $1"
+  [ "$2" = "true" ] && [ $FORCE_MODE -eq 0 ] && tg_send "Update to version $LATEST_VERSION failed: $1"
+  exit "${3:-1}"
 }
 
-log_and_exit() {
-  local message="$1"
-  local exit_code="${2:-1}"
-  echo "$message" >> $LOG_FILE
-  exit $exit_code
+tg_api() {
+  local endpoint="$1"; shift
+  curl -sf --max-time "$CURL_TIMEOUT" "${TELEGRAM_API_BASE}${BOT_TOKEN}/${endpoint}" "$@" 2>/dev/null
+}
+
+tg_api_long() {
+  local endpoint="$1"; shift
+  curl -sf --max-time "$((LONG_POLL_TIMEOUT + 5))" "${TELEGRAM_API_BASE}${BOT_TOKEN}/${endpoint}" "$@" 2>/dev/null
+}
+
+tg_send() {
+  local msg
+  msg=$(printf '%b' "$1")
+  SEND_RESPONSE=$(tg_api "sendMessage" -X POST -d "chat_id=$CHAT_ID" --data-urlencode "text=$msg")
+  if [ $? -ne 0 ]; then
+    log "Error: Failed to send Telegram notification (network error)"
+    return 1
+  fi
+  if echo "$SEND_RESPONSE" | grep -q '"ok":true'; then
+    log "Sent Telegram notification: $1"
+    return 0
+  fi
+  log "Error: Failed to send Telegram notification"
+  return 1
+}
+
+check_reply() {
+  local updates="$1" msgid="$2"
+  echo "$updates" | jq -r --arg msgid "$msgid" '
+    .result[]
+    | select(.message.reply_to_message.message_id == ($msgid | tonumber))
+    | .message.text | ascii_downcase
+    | select(. == "yes" or . == "no")
+  ' | head -1
 }
 
 test_telegram() {
   local test_message="${1:-Podkop updater test message: Telegram notifications are working!}"
-
-  echo "Testing Telegram connection..." >> $LOG_FILE
+  log "Testing Telegram connection..."
 
   if [ "$BOT_TOKEN" = "your_bot_token" ] || [ "$CHAT_ID" = "your_chat_id" ]; then
-    echo "Error: BOT_TOKEN or CHAT_ID not configured"
-    echo "Error: BOT_TOKEN or CHAT_ID not configured" >> $LOG_FILE
+    log_tee "Error: BOT_TOKEN or CHAT_ID not configured"
     return 1
   fi
 
   echo "Checking Telegram API connectivity..."
-  API_RESPONSE=$(curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getMe")
+  API_RESPONSE=$(tg_api "getMe")
+  if [ $? -ne 0 ]; then
+    log_tee "Error: Cannot connect to Telegram API (network error)"
+    return 1
+  fi
+
   if echo "$API_RESPONSE" | grep -q '"ok":true'; then
     BOT_NAME=$(echo "$API_RESPONSE" | jq -r '.result.username')
-    echo "API connection successful. Bot: @$BOT_NAME"
-    echo "API connection successful. Bot: @$BOT_NAME" >> $LOG_FILE
+    log_tee "API connection successful. Bot: @$BOT_NAME"
   else
-    echo "Error: Cannot connect to Telegram API"
+    log_tee "Error: Cannot connect to Telegram API"
     echo "Response: $API_RESPONSE"
-    echo "Error: Cannot connect to Telegram API. Response: $API_RESPONSE" >> $LOG_FILE
     return 1
   fi
 
   echo "Sending test message to chat $CHAT_ID..."
-  if send_telegram_message "$test_message"; then
+  if tg_send "$test_message"; then
     echo "Test message sent successfully!"
     return 0
-  else
-    echo "Error: Failed to send test message"
-    return 1
   fi
+  echo "Error: Failed to send test message"
+  return 1
 }
 
-# Starting update check - will log result at the end
+# =============================================================================
+# Main Script
+# =============================================================================
 
-# Step 1: Check for --test-telegram parameter (test mode)
 if [ "$1" = "--test-telegram" ]; then
   test_telegram "$2"
   exit $?
 fi
 
-# Step 2: Check for --force parameter (automatic mode without Telegram)
-FORCE_MODE=0  # Flag for force mode (0=Telegram mode, 1=automatic mode)
-if [ "$1" = "--force" ]; then
-  FORCE_MODE=1
-  echo "Running in force mode (automatic update without Telegram)" >> $LOG_FILE
-fi
+FORCE_MODE=0
+[ "$1" = "--force" ] && { FORCE_MODE=1; log "Running in force mode"; }
 
-# Step 2: Fetch the latest version from GitHub
-LATEST_RELEASE=$(curl -s $GITHUB_API_URL)  # JSON response from GitHub API
-if [ -z "$LATEST_RELEASE" ]; then
-  log_and_exit "Error: Failed to fetch GitHub release"
-fi
-LATEST_VERSION=$(echo $LATEST_RELEASE | jq -r '.tag_name')  # Extract version tag from JSON
-LATEST_VERSION=${LATEST_VERSION#v}  # Remove "v" prefix if present
+LATEST_RELEASE=$(curl -sf --max-time "$CURL_TIMEOUT" "$GITHUB_API_URL" 2>/dev/null)
+[ $? -ne 0 ] || [ -z "$LATEST_RELEASE" ] && log_exit "Error: Failed to fetch GitHub release"
 
-# Step 3: Get the installed version on the router
-INSTALLED_INFO=$(opkg info podkop)  # Package information from opkg
-INSTALLED_VERSION=$(echo "$INSTALLED_INFO" | grep '^Version:' | cut -d' ' -f2)  # Extract version string
-INSTALLED_MAIN_VERSION=${INSTALLED_VERSION%-*}  # Remove package revision (e.g., "-1")
-INSTALLED_MAIN_VERSION=${INSTALLED_MAIN_VERSION#v}  # Remove "v" prefix if present
+LATEST_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+LATEST_VERSION=${LATEST_VERSION#v}
+echo "$LATEST_VERSION" | grep -qE "$VERSION_PATTERN" || log_exit "Error: Invalid version format: $LATEST_VERSION"
 
-# Step 4: Compare versions
+INSTALLED_VERSION=$(opkg info podkop | grep '^Version:' | cut -d' ' -f2)
+INSTALLED_MAIN_VERSION=${INSTALLED_VERSION%-*}
+INSTALLED_MAIN_VERSION=${INSTALLED_MAIN_VERSION#v}
+
 if [ "$(printf '%s\n' "$INSTALLED_MAIN_VERSION" "$LATEST_VERSION" | sort -V | tail -n1)" = "$LATEST_VERSION" ] && [ "$INSTALLED_MAIN_VERSION" != "$LATEST_VERSION" ]; then
-  echo "Update check at $(date) - New version available: $LATEST_VERSION (current: $INSTALLED_VERSION)" >> $LOG_FILE
+  log "Update check at $(date) - New version available: $LATEST_VERSION (current: $INSTALLED_VERSION)"
 
-  # Step 5: Handle update based on mode
-  if [ $FORCE_MODE -eq 1 ]; then
-    # Automatic mode: Run update without Telegram
-    echo "Proceeding with automatic update" >> $LOG_FILE
-  else
-    # Telegram mode: Check Telegram API connectivity
-    curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getMe" > $TEMP_TELEGRAM_FILE
-    if ! grep -q '"ok":true' $TEMP_TELEGRAM_FILE; then
-      log_and_exit "Error: Cannot connect to Telegram API. Check token or network."
-    fi
-    echo "Telegram API connection successful" >> $LOG_FILE
+  if [ $FORCE_MODE -eq 0 ]; then
+    API_CHECK=$(tg_api "getMe")
+    [ $? -ne 0 ] || ! echo "$API_CHECK" | grep -q '"ok":true' && log_exit "Error: Cannot connect to Telegram API"
+    log "Telegram API connection successful"
 
-    # Send message to Telegram
-    SEND_RESPONSE=$(curl -X POST "${TELEGRAM_API_BASE}${BOT_TOKEN}/sendMessage" -d chat_id=$CHAT_ID -d text="New version available: $LATEST_VERSION. Current: $INSTALLED_VERSION. Reply to this message with 'yes' to update or 'no' to cancel.")  # Telegram API response
-    MESSAGE_ID=$(echo $SEND_RESPONSE | jq -r '.result.message_id')  # Extract message ID from response
-    if [ -z "$MESSAGE_ID" ] || [ "$MESSAGE_ID" = "null" ]; then
-      log_and_exit "Error: Failed to send Telegram message"
-    fi
-    echo "Sent Telegram message, ID: $MESSAGE_ID" >> $LOG_FILE
+    SEND_RESPONSE=$(tg_api "sendMessage" -X POST -d "chat_id=$CHAT_ID" \
+      -d "text=New version available: $LATEST_VERSION. Current: $INSTALLED_VERSION. Reply 'yes' to update or 'no' to cancel.")
+    [ $? -ne 0 ] && log_exit "Error: Failed to send Telegram message (network error)"
 
-    # Clear old updates and get initial offset
-    GET_UPDATES=$(curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getUpdates?offset=-1")  # Get latest updates to clear queue
-    LAST_UPDATE_ID=$(echo $GET_UPDATES | jq -r '.result[-1].update_id // 0')  # Get last update ID
-    OFFSET=$((LAST_UPDATE_ID + 1))  # Set offset for polling new updates
-    echo "Initial offset: $OFFSET" >> $LOG_FILE
+    MESSAGE_ID=$(echo "$SEND_RESPONSE" | jq -r '.result.message_id')
+    [ -z "$MESSAGE_ID" ] || [ "$MESSAGE_ID" = "null" ] && log_exit "Error: Failed to send Telegram message"
+    log "Sent Telegram message, ID: $MESSAGE_ID"
 
-    # Poll for response (yes/no)
-    START_TIME=$(date +%s)  # Record polling start time
+    GET_UPDATES=$(tg_api "getUpdates?offset=-1")
+    [ $? -ne 0 ] && log_exit "Error: Failed to get Telegram updates"
+    OFFSET=$(($(echo "$GET_UPDATES" | jq -r '.result[-1].update_id // 0') + 1))
+    log "Initial offset: $OFFSET"
+
+    USER_REPLY=""
+    START_TIME=$(date +%s)
     while [ $(( $(date +%s) - START_TIME )) -lt $POLL_TIMEOUT ]; do
-      sleep $POLL_INTERVAL
-      GET_UPDATES=$(curl -s "${TELEGRAM_API_BASE}${BOT_TOKEN}/getUpdates?offset=$OFFSET")  # Poll for new updates
-      echo "Polling updates, offset: $OFFSET" >> $LOG_FILE
-      echo "Updates response: $GET_UPDATES" >> $LOG_FILE
-
-      # Check for "yes" response (case-insensitive)
-      YES_ID=$(echo $GET_UPDATES | jq -r --arg msgid "$MESSAGE_ID" '.result[] | select(.message.reply_to_message != null) | select(.message.reply_to_message.message_id == ($msgid | tonumber)) | select(.message.text | ascii_downcase == "yes") | .update_id')  # Extract update ID if yes reply found
-      if [ -n "$YES_ID" ]; then
-        echo "Update requested (yes response detected)" >> $LOG_FILE
-        break
+      GET_UPDATES=$(tg_api_long "getUpdates?offset=$OFFSET&timeout=$LONG_POLL_TIMEOUT")
+      if [ $? -ne 0 ]; then
+        log "Warning: Telegram polling failed, retrying..."
+        sleep 5
+        continue
       fi
+      log "Polling updates, offset: $OFFSET"
 
-      # Check for "no" response (case-insensitive)
-      NO_ID=$(echo $GET_UPDATES | jq -r --arg msgid "$MESSAGE_ID" '.result[] | select(.message.reply_to_message != null) | select(.message.reply_to_message.message_id == ($msgid | tonumber)) | select(.message.text | ascii_downcase == "no") | .update_id')  # Extract update ID if no reply found
-      if [ -n "$NO_ID" ]; then
-        echo "Update declined (no response detected)" >> $LOG_FILE
-        exit 0
-      fi
+      USER_REPLY=$(check_reply "$GET_UPDATES" "$MESSAGE_ID")
+      [ -n "$USER_REPLY" ] && break
 
-      # Update offset for the next poll
-      LAST_UPDATE_ID=$(echo $GET_UPDATES | jq -r '.result[-1].update_id // 0')  # Get ID of most recent update
-      if [ "$LAST_UPDATE_ID" != "0" ]; then
-        OFFSET=$((LAST_UPDATE_ID + 1))  # Set next polling offset
-      fi
-      echo "Updated offset: $OFFSET" >> $LOG_FILE
+      LAST_ID=$(echo "$GET_UPDATES" | jq -r '.result[-1].update_id // 0')
+      [ "$LAST_ID" != "0" ] && OFFSET=$((LAST_ID + 1))
     done
 
-    # Check if update was approved
-    if [ -z "$YES_ID" ]; then
-      log_and_exit "No response received within $((POLL_TIMEOUT/60)) minutes" 0
-    fi
-  fi
-
-  # Step 6: Run the update script
-  if ! command -v wget >/dev/null 2>&1; then
-    echo "Error: wget not installed" >> $LOG_FILE
-    if [ $FORCE_MODE -eq 0 ]; then
-      send_telegram_message "Update to version $LATEST_VERSION failed: wget not installed. No DNS check performed."
-    fi
-    exit 1
-  fi
-  UPDATE_SCRIPT=$(wget -O - $UPDATE_SCRIPT_URL 2>>$LOG_FILE)  # Download update script content
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to fetch update script" >> $LOG_FILE
-    if [ $FORCE_MODE -eq 0 ]; then
-      send_telegram_message "Update to version $LATEST_VERSION failed: Could not fetch update script. No DNS check performed."
-    fi
-    exit 1
-  fi
-  # Pipe 'y\ny\n' to answer both prompts: upgrade podkop and install Russian translation
-  echo -e "y\ny\n" | sh -c "$UPDATE_SCRIPT" >> $LOG_FILE 2>&1  # Execute update script with automatic responses
-  UPDATE_EXIT_CODE=$?  # Capture exit code of update script execution
-  if [ $UPDATE_EXIT_CODE -eq 0 ]; then
-    echo "Update script executed successfully" >> $LOG_FILE
+    case "$USER_REPLY" in
+      yes) log "Update approved" ;;
+      no)  log "Update declined"; exit 0 ;;
+      *)   log_exit "No response within $((POLL_TIMEOUT/60)) minutes" 0 ;;
+    esac
   else
-    echo "Error: Update script failed" >> $LOG_FILE
-    if [ $FORCE_MODE -eq 0 ]; then
-      send_telegram_message "Update to version $LATEST_VERSION failed: Update script execution error. No DNS check performed."
-    fi
-    exit 1
+    log "Proceeding with automatic update"
   fi
 
-  # Step 7: Post-update check after delay
-  echo "Loading constants from $PODKOP_CONSTANTS..." >> $LOG_FILE
-  if [ -f "$PODKOP_CONSTANTS" ]; then
-    . "$PODKOP_CONSTANTS"
-  fi
-  echo "Waiting $DNS_CHECK_DELAY seconds before performing post-update DNS check..." >> $LOG_FILE
-  sleep $DNS_CHECK_DELAY  # Wait for podkop service to restart after update
-  echo "Running nslookup check for $FAKEIP_TEST_DOMAIN..." >> $LOG_FILE
-  NSLOOKUP_OUTPUT=$(nslookup -timeout=$DNS_TIMEOUT "$FAKEIP_TEST_DOMAIN" $DNS_SERVER 2>&1)  # DNS lookup output with timeout
-  echo "$NSLOOKUP_OUTPUT" >> $LOG_FILE
-  DNS_CHECK_RESULT=""  # Result message for DNS check
+  UPDATE_SCRIPT=$(wget -O - "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE")
+  [ $? -ne 0 ] && handle_error "Could not fetch update script" "true"
+
+  echo -e "y\ny\n" | sh -c "$UPDATE_SCRIPT" >> "$LOG_FILE" 2>&1
+  [ $? -ne 0 ] && handle_error "Update script execution error" "true"
+  log "Update script executed successfully"
+
+  [ -f "$PODKOP_CONSTANTS" ] && . "$PODKOP_CONSTANTS"
+  log "Waiting $DNS_CHECK_DELAY seconds before DNS check..."
+  sleep "$DNS_CHECK_DELAY"
+
+  NSLOOKUP_OUTPUT=$(nslookup -timeout="$DNS_TIMEOUT" "$FAKEIP_TEST_DOMAIN" "$DNS_SERVER" 2>&1)
+  log "$NSLOOKUP_OUTPUT"
+
   if echo "$NSLOOKUP_OUTPUT" | grep -q "$EXPECTED_DNS_PATTERN"; then
-    echo "Post-update check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x (podkop is working)" >> $LOG_FILE
-    DNS_CHECK_RESULT="DNS check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x"  # Success message for DNS check
+    log "Post-update check passed: podkop is working"
+    DNS_CHECK_RESULT="DNS check passed: $FAKEIP_TEST_DOMAIN resolved to 198.18.x.x"
   else
-    echo "Post-update check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x (podkop may not be working)" >> $LOG_FILE
-    DNS_CHECK_RESULT="DNS check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x or error occurred"  # Failure message for DNS check
+    log "Post-update check failed: podkop may not be working"
+    DNS_CHECK_RESULT="DNS check failed: $FAKEIP_TEST_DOMAIN did not resolve to 198.18.x.x"
   fi
 
-  # Step 8: Send Telegram notification (only in Telegram mode)
-  if [ $FORCE_MODE -eq 0 ]; then
-    if [ -n "$DNS_CHECK_RESULT" ]; then
-      send_telegram_message "Update to version $LATEST_VERSION completed successfully.\n$DNS_CHECK_RESULT"
-    else
-      send_telegram_message "Update to version $LATEST_VERSION completed successfully.\nDNS check was skipped due to FAKEIP_TEST_DOMAIN retrieval failure."
-    fi
-  fi
+  [ $FORCE_MODE -eq 0 ] && tg_send "Update to version $LATEST_VERSION completed.\n$DNS_CHECK_RESULT"
 else
-  echo "Update check at $(date) - No new version" >> $LOG_FILE
+  log "Update check at $(date) - No new version"
 fi
