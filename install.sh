@@ -77,11 +77,11 @@ echo "Dependencies installed."
 # Step 3: Check if podkop_updater.sh already exists and is configured
 if [ -f "$UPDATER_PATH" ]; then
   echo "Found existing podkop_updater.sh at $UPDATER_PATH"
-  
+
   # Check if it's already configured (not default values)
   EXISTING_BOT_TOKEN=$(grep '^BOT_TOKEN=' $UPDATER_PATH | cut -d'"' -f2)
   EXISTING_CHAT_ID=$(grep '^CHAT_ID=' $UPDATER_PATH | cut -d'"' -f2)
-  
+
   if [ "$EXISTING_BOT_TOKEN" != "$DEFAULT_BOT_TOKEN" ] && [ "$EXISTING_CHAT_ID" != "$DEFAULT_CHAT_ID" ]; then
     echo "Script is already configured with:"
     echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:$TOKEN_DISPLAY_LENGTH}..."
@@ -93,7 +93,7 @@ if [ -f "$UPDATER_PATH" ]; then
     echo "3) Update script but keep existing configuration"
     echo "Enter 1, 2, or 3 (default: 1):"
     read -r EXISTING_CONFIG_CHOICE
-    
+
     case "$EXISTING_CONFIG_CHOICE" in
       2)
         echo "Reconfiguring with new settings..."
@@ -200,4 +200,8 @@ else
   echo "Reply 'yes' to Telegram messages to update or 'no' to cancel."
 fi
 echo "Logs will be written to $LOG_FILE."
-echo "To test the script, run: $UPDATER_PATH"
+echo ""
+echo "Available commands:"
+echo "  $UPDATER_PATH              - Run update check"
+echo "  $UPDATER_PATH --dry-run    - Test full flow without making changes"
+echo "  $UPDATER_PATH --force      - Force update without Telegram confirmation"
