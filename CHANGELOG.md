@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 2026-04-16
+## 2026-04-16
 
 ### Changed
 - **UCI-based credentials** — `BOT_TOKEN` and `CHAT_ID` are no longer hardcoded in the script.
