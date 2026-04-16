@@ -145,6 +145,7 @@ detect_socks_proxy() {
     if [ -n "$sb_ip" ]; then
       if [ "$sb_ip" = "0.0.0.0" ] || [ "$sb_ip" = "::" ]; then
         lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
+        lan_ip=${lan_ip%%/*}  # strip CIDR mask (e.g. /24)
         SOCKS_IP="${lan_ip:-127.0.0.1}"
       else
         SOCKS_IP="$sb_ip"
@@ -154,6 +155,7 @@ detect_socks_proxy() {
   fi
 
   lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
+  lan_ip=${lan_ip%%/*}  # strip CIDR mask
   SOCKS_IP="${lan_ip:-127.0.0.1}"
 }
 
