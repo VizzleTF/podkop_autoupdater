@@ -440,7 +440,7 @@ do_self_update() {
   mv "$tmp_script" "$updater_path"
   chmod +x "$updater_path"
   log "Self-update: script updated at $updater_path"
-  tg_send "Updater script updated. Restarting daemon..."
+  send_or_edit "$MENU_MSG_ID" "Updater script updated. Restarting daemon..." '{"inline_keyboard":[]}'
 
   # Restart via init.d if available, otherwise exec
   if [ -f /etc/init.d/podkop_updater ]; then
