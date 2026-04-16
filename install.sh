@@ -7,11 +7,10 @@
 UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh"  # URL to download the updater script
 UPDATER_PATH="/usr/bin/podkop_updater.sh"  # Installation path for the updater script
 LOG_FILE="/tmp/podkop_update.log"  # Log file for update operations
-DEFAULT_BOT_TOKEN="your_bot_token"  # Default placeholder for Telegram bot token
-DEFAULT_CHAT_ID="your_chat_id"  # Default placeholder for Telegram chat ID
+UCI_PKG="podkop_updater"           # UCI package name for credentials storage
+UCI_SEC="settings"                 # UCI section name
 DEFAULT_CRON_HOURS=1  # Default cron interval in hours. Must be bigger than POLL_TIMEOUT to avoid overlapping runs
 TOKEN_DISPLAY_LENGTH=10  # Number of characters to show when displaying bot token
-TEMP_UPDATER_PATH="/tmp/podkop_updater_new.sh"  # Temporary path for downloaded updater script
 CRON_FILE="/etc/crontabs/root"  # Path to root crontab file
 OS_RELEASE_FILE="/etc/os-release"  # System OS release information file
 GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"  # GitHub API URL for latest podkop release
@@ -61,62 +60,100 @@ if ! grep -q -e "OpenWrt" -e "immortalwrt" $OS_RELEASE_FILE; then
   exit_with_error "This script is designed for OpenWrt or ImmortalWrt. Exiting."
 fi
 
+# Detect package manager: OpenWrt 25.x+ uses apk, older versions use opkg
+PKG_MANAGER=""
+if command -v apk >/dev/null 2>&1; then
+  PKG_MANAGER="apk"
+elif command -v opkg >/dev/null 2>&1; then
+  PKG_MANAGER="opkg"
+else
+  _ver=$(grep "^VERSION_ID=" "$OS_RELEASE_FILE" 2>/dev/null | cut -d'"' -f2)
+  _major=$(echo "$_ver" | cut -d'.' -f1)
+  if echo "$_major" | grep -qE '^[0-9]+$' && [ "$_major" -ge 25 ] 2>/dev/null; then
+    PKG_MANAGER="apk"
+  else
+    PKG_MANAGER="opkg"
+  fi
+  unset _ver _major
+fi
+
+OWRT_VERSION=$(grep '^VERSION_ID=' "$OS_RELEASE_FILE" 2>/dev/null | cut -d'"' -f2)
+echo "OpenWrt version : ${OWRT_VERSION:-unknown}"
+echo "Package manager : ${PKG_MANAGER}"
+
+pkg_update() {
+  case "$PKG_MANAGER" in
+    apk)  apk update >/dev/null 2>&1 ;;
+    opkg) opkg update >/dev/null 2>&1 ;;
+  esac
+}
+
+pkg_is_installed() {
+  case "$PKG_MANAGER" in
+    apk)  apk info "$1" >/dev/null 2>&1 ;;
+    opkg) opkg list-installed 2>/dev/null | grep -q "^${1} " ;;
+  esac
+}
+
+pkg_install() {
+  case "$PKG_MANAGER" in
+    apk)  apk add "$1" >/dev/null 2>&1 ;;
+    opkg) opkg install "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
 # Step 2: Install dependencies
 echo "Installing required packages (curl, jq, wget)..."
-opkg update > /dev/null 2>&1
+pkg_update
 for pkg in curl jq wget; do
-  if ! opkg list-installed | grep -q "^$pkg "; then
-    opkg install $pkg > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      exit_with_error "Failed to install $pkg. Please check your internet connection and opkg repositories."
+  if pkg_is_installed "$pkg"; then
+    echo "  $pkg — already installed"
+  else
+    printf "  Installing %s... " "$pkg"
+    if pkg_install "$pkg"; then
+      echo "OK"
+    else
+      echo "FAILED"
+      exit_with_error "Failed to install $pkg. Please check your internet connection and package repositories."
     fi
   fi
 done
 echo "Dependencies installed."
 
 # Step 3: Check if podkop_updater.sh already exists and is configured
-if [ -f "$UPDATER_PATH" ]; then
+EXISTING_BOT_TOKEN=$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token 2>/dev/null)
+EXISTING_CHAT_ID=$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id 2>/dev/null)
+
+if [ -f "$UPDATER_PATH" ] && [ -n "$EXISTING_BOT_TOKEN" ] && [ -n "$EXISTING_CHAT_ID" ]; then
   echo "Found existing podkop_updater.sh at $UPDATER_PATH"
+  echo "Script is already configured with:"
+  echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:$TOKEN_DISPLAY_LENGTH}..."
+  echo "  Chat ID: $EXISTING_CHAT_ID"
+  echo ""
+  echo "Choose an option:"
+  echo "1) Keep existing configuration and exit"
+  echo "2) Reconfigure with new settings"
+  echo "3) Update script but keep existing configuration"
+  echo "Enter 1, 2, or 3 (default: 1):"
+  read -r EXISTING_CONFIG_CHOICE
 
-  # Check if it's already configured (not default values)
-  EXISTING_BOT_TOKEN=$(grep '^BOT_TOKEN=' $UPDATER_PATH | cut -d'"' -f2)
-  EXISTING_CHAT_ID=$(grep '^CHAT_ID=' $UPDATER_PATH | cut -d'"' -f2)
-
-  if [ "$EXISTING_BOT_TOKEN" != "$DEFAULT_BOT_TOKEN" ] && [ "$EXISTING_CHAT_ID" != "$DEFAULT_CHAT_ID" ]; then
-    echo "Script is already configured with:"
-    echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:$TOKEN_DISPLAY_LENGTH}..."
-    echo "  Chat ID: $EXISTING_CHAT_ID"
-    echo ""
-    echo "Choose an option:"
-    echo "1) Keep existing configuration and exit"
-    echo "2) Reconfigure with new settings"
-    echo "3) Update script but keep existing configuration"
-    echo "Enter 1, 2, or 3 (default: 1):"
-    read -r EXISTING_CONFIG_CHOICE
-
-    case "$EXISTING_CONFIG_CHOICE" in
-      2)
-        echo "Reconfiguring with new settings..."
-        ;;
-      3)
-        echo "Updating script while preserving configuration..."
-        # Download new version but preserve config
-        download_file $UPDATER_URL $TEMP_UPDATER_PATH
-        # Replace config in new version with existing values
-        sed -i "s|BOT_TOKEN=\"$DEFAULT_BOT_TOKEN\"|BOT_TOKEN=\"$EXISTING_BOT_TOKEN\"|" $TEMP_UPDATER_PATH
-        sed -i "s|CHAT_ID=\"$DEFAULT_CHAT_ID\"|CHAT_ID=\"$EXISTING_CHAT_ID\"|" $TEMP_UPDATER_PATH
-        mv $TEMP_UPDATER_PATH $UPDATER_PATH
-        chmod +x $UPDATER_PATH
-        echo "Script updated with preserved configuration."
-        echo "Installation complete! The script is ready to use."
-        exit 0
-        ;;
-      1|*)
-        echo "Keeping existing configuration. Installation complete!"
-        exit 0
-        ;;
-    esac
-  fi
+  case "$EXISTING_CONFIG_CHOICE" in
+    2)
+      echo "Reconfiguring with new settings..."
+      ;;
+    3)
+      echo "Updating script while preserving UCI configuration..."
+      download_file $UPDATER_URL $UPDATER_PATH
+      chmod +x $UPDATER_PATH
+      echo "Script updated. UCI configuration (/etc/config/${UCI_PKG}) preserved."
+      echo "Installation complete! The script is ready to use."
+      exit 0
+      ;;
+    1|*)
+      echo "Keeping existing configuration. Installation complete!"
+      exit 0
+      ;;
+  esac
 fi
 
 # Download podkop_updater.sh
@@ -160,12 +197,17 @@ case "$UPDATE_MODE" in
     if [ -z "$CHAT_ID" ]; then
       exit_with_error "Chat ID cannot be empty. Exiting."
     fi
-    # Configure podkop_updater.sh
-    echo "Configuring podkop_updater.sh with bot token and chat ID..."
-    sed -i "s|BOT_TOKEN=\"$DEFAULT_BOT_TOKEN\"|BOT_TOKEN=\"$BOT_TOKEN\"|" $UPDATER_PATH
-    sed -i "s|CHAT_ID=\"$DEFAULT_CHAT_ID\"|CHAT_ID=\"$CHAT_ID\"|" $UPDATER_PATH
-    if ! grep -q "BOT_TOKEN=\"$BOT_TOKEN\"" $UPDATER_PATH || ! grep -q "CHAT_ID=\"$CHAT_ID\"" $UPDATER_PATH; then
-      exit_with_error "Failed to configure podkop_updater.sh. Please check the script file."
+    # Save credentials to UCI
+    echo "Saving credentials to UCI (/etc/config/${UCI_PKG})..."
+    [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
+    uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null
+    uci set "${UCI_PKG}.${UCI_SEC}=${UCI_SEC}"
+    uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${BOT_TOKEN}"
+    uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT_ID}"
+    uci commit "${UCI_PKG}"
+    if [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token)" != "$BOT_TOKEN" ] || \
+       [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id)" != "$CHAT_ID" ]; then
+      exit_with_error "Failed to save UCI configuration."
     fi
     # Prompt for cron frequency
     echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
