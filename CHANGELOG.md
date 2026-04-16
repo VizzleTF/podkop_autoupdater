@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 2026-04-16 (2)
 
 ### Added
 - **Daemon mode (`--daemon`)** — persistent Telegram bot with inline menu:
@@ -8,7 +8,7 @@
   - When a new version is detected, menu switches to "Update" / "Cancel".
   - Continuous long-polling loop with automatic reconnection on failure.
   - Periodic auto-check for new versions (configurable interval via UCI `check_interval`).
-  - Security: only responds to the configured `CHAT_ID`.
+  - Only responds to the configured `CHAT_ID`.
 - **procd init.d service** (`/etc/init.d/podkop_updater`) for daemon mode:
   - Auto-start on boot, automatic respawn on crash.
   - Install via `install.sh` mode 4 (now the default).
@@ -19,12 +19,12 @@
   - **tier2** — Direct connection
   - **tier3** — Emergency hardcoded Telegram IPs (`149.154.167.220`, `149.154.166.110`, `91.108.4.249`)
 - Auto-detection of Podkop mixed proxy IP/port from UCI and sing-box config.
-- Transport tier logged on each switch; dry-run mode prints the active tier.
 
 ### Changed
 - Refactored main flow into reusable functions (`do_version_check`, `do_update`, `do_restart_podkop`, `do_dns_check`).
 - `install.sh` default mode changed from cron (mode 3) to daemon (mode 4).
-- `handle_error()` returns instead of exiting in daemon mode.
+- `install.sh` option 3 ("Update script, keep config") now restarts daemon automatically.
+- `install.sh` uses `curl` as primary downloader with `wget` fallback (OpenWrt 25.x ships wget without HTTPS).
 
 ---
 

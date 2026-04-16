@@ -2,57 +2,72 @@
 
 # Podkop Updater for OpenWrt
 
-Automatic update checker for [podkop](https://github.com/itdoginfo/podkop) on OpenWrt/ImmortalWrt routers.
+Automatic update checker for [podkop](https://github.com/itdoginfo/podkop) on OpenWrt/ImmortalWrt routers with Telegram bot control.
 
 ## Features
-- Checks latest version via GitHub API
-- Three modes: manual, automatic (`--force`), Telegram confirmation (default)
-- Dry-run mode for testing without changes (`--dry-run`)
-- Post-update DNS check to verify podkop functionality
-- Long polling for efficient Telegram response handling
+- Persistent Telegram bot with inline menu (daemon mode, default)
+- Two buttons: "Check version" and "Restart podkop", always available
+- Menu switches to "Update" / "Cancel" when a new version is detected
+- Automatic periodic version check (configurable interval)
+- 3-tier transport fallback: Podkop SOCKS5 proxy → Direct → Emergency Telegram IPs
+- Post-update/restart DNS health check
+- procd init.d service with auto-restart on crash
+- Legacy modes: cron with Telegram confirmation, cron with auto-update, manual
 
 ## Requirements
 - OpenWrt or ImmortalWrt router
-- Packages: `curl`, `jq`, `wget`, `nslookup`
-- Telegram bot (for confirmation mode): token from [@BotFather](https://t.me/BotFather), chat ID from [@getmyid_bot](https://t.me/getmyid_bot)
+- Packages: `curl`, `jq`, `wget`, `nslookup` (installed automatically)
+- Telegram bot: token from [@BotFather](https://t.me/BotFather), chat ID from [@getmyid_bot](https://t.me/getmyid_bot)
 
 ## Installation
 ```sh
-sh <(wget -O - https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)
+sh <(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)
 ```
 
 The installer will guide you through mode selection and configuration.
+
+### Update modes
+| Mode | Description |
+|------|-------------|
+| 1 | Manual — run via console, no automation |
+| 2 | Automatic — cron, no Telegram |
+| 3 | Cron + Telegram confirmation |
+| **4 (default)** | **Daemon with persistent Telegram menu** |
 
 ## Usage
 
 | Command | Description |
 |---------|-------------|
-| `podkop_updater.sh` | Check for updates (Telegram mode) |
+| `podkop_updater.sh --daemon` | Run as persistent Telegram bot (used by init.d) |
+| `podkop_updater.sh` | One-shot update check (Telegram confirmation) |
 | `podkop_updater.sh --force` | Auto-update without confirmation |
 | `podkop_updater.sh --dry-run` | Test full flow without making changes |
 
-In Telegram mode, reply directly to the bot's message with `yes` or `no`.
+### Service management (daemon mode)
+```sh
+/etc/init.d/podkop_updater start
+/etc/init.d/podkop_updater stop
+/etc/init.d/podkop_updater restart
+```
 
 ## Configuration
 
-Edit `/usr/bin/podkop_updater.sh`:
+Credentials are stored in UCI (`/etc/config/podkop_updater`):
 ```sh
-BOT_TOKEN="your_bot_token"
-CHAT_ID="your_chat_id"
+uci set podkop_updater.settings.bot_token="YOUR_TOKEN"
+uci set podkop_updater.settings.chat_id="YOUR_CHAT_ID"
+uci set podkop_updater.settings.check_interval=6  # hours, daemon mode only
+uci commit podkop_updater
 ```
-
-Key timeouts (in seconds):
-- `POLL_TIMEOUT=3300` — Max wait time for Telegram reply (~55 min)
-- `DNS_CHECK_DELAY=60` — Delay before DNS check after update
 
 ## Troubleshooting
 
 Check logs: `cat /tmp/podkop_update.log`
 
 Common issues:
-- **No Telegram message**: Verify `BOT_TOKEN` and `CHAT_ID`, check network access to `api.telegram.org`
-- **Reply not detected**: Must reply directly to the message (use Reply function in Telegram)
+- **No Telegram message**: Verify bot token and chat ID, check network access to `api.telegram.org`
 - **DNS check fails**: Normal if podkop service isn't running yet
+- **Daemon not starting**: Check `/etc/init.d/podkop_updater status`, review logs
 
 ## License
 [MIT](https://opensource.org/licenses/MIT)
