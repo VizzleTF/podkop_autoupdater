@@ -29,10 +29,12 @@ exit_with_error() {
 download_file() {
   local url="$1"
   local output_path="$2"
-  wget -O "$output_path" "$url" > /dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    exit_with_error "Failed to download from $url. Please check your internet connection."
+  if curl -sfL -o "$output_path" "$url" 2>/dev/null; then
+    return 0
+  elif wget -O "$output_path" "$url" > /dev/null 2>&1; then
+    return 0
   fi
+  exit_with_error "Failed to download from $url. Please check your internet connection."
 }
 
 setup_cron_job() {

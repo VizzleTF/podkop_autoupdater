@@ -339,7 +339,8 @@ do_update() {
   local update_script
   log "Starting update to version $PENDING_LATEST_VERSION"
 
-  if ! update_script=$(wget -O - "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE"); then
+  update_script=$(curl -sfL "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE") || update_script=$(wget -O - "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE")
+  if [ -z "$update_script" ]; then
     handle_error "Could not fetch update script" "true"
     return 1
   fi
@@ -660,7 +661,8 @@ if [ "$UPDATE_AVAILABLE" -eq 1 ]; then
     curl -sf --max-time "$CURL_TIMEOUT" -I "$UPDATE_SCRIPT_URL" >/dev/null 2>&1 && dry_print "OK: Update script URL is accessible" || dry_print "WARNING: Update script URL may not be accessible"
     dry_print "SKIPPED: Actual download and execution (dry run)"
   else
-    if ! UPDATE_SCRIPT=$(wget -O - "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE"); then
+    UPDATE_SCRIPT=$(curl -sfL "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE") || UPDATE_SCRIPT=$(wget -O - "$UPDATE_SCRIPT_URL" 2>>"$LOG_FILE")
+    if [ -z "$UPDATE_SCRIPT" ]; then
       handle_error "Could not fetch update script" "true"
     fi
     if ! printf 'y\ny\n' | sh -c "$UPDATE_SCRIPT" >> "$LOG_FILE" 2>&1; then
