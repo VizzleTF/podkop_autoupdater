@@ -470,13 +470,18 @@ daemon_loop() {
   while true; do
     rotate_log
 
-    if ! get_updates=$(tg_api "getUpdates?offset=$OFFSET&timeout=$LONG_POLL_TIMEOUT" "$((LONG_POLL_TIMEOUT + 5))"); then
+    if ! get_updates=$(tg_api "getUpdates?offset=$OFFSET" "$CURL_TIMEOUT"); then
       log "Warning: Telegram polling failed, retrying..."
       sleep 5
       continue
     fi
 
     update_count=$(echo "$get_updates" | jq '.result | length')
+
+    # Short polling: sleep if no updates to avoid hammering the API
+    if [ "$update_count" -eq 0 ]; then
+      sleep 2
+    fi
 
     i=0
     while [ "$i" -lt "$update_count" ]; do
