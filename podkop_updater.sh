@@ -31,6 +31,7 @@ LONG_POLL_TIMEOUT=60
 # URLs and Paths
 GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
 UPDATE_SCRIPT_URL="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
+SELF_UPDATE_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/podkop_updater.sh"
 TELEGRAM_API_BASE="https://api.telegram.org/bot"
 PODKOP_CONSTANTS="/usr/lib/podkop/constants.sh"
 
@@ -256,18 +257,20 @@ send_or_edit() {
   return 1
 }
 
-# Send the default menu (check version / restart)
+# Default keyboard JSON (reused in multiple places)
+KB_DEFAULT='{"inline_keyboard":[[{"text":"🔍 Check version","callback_data":"cmd_check"}],[{"text":"🔄 Restart podkop","callback_data":"cmd_restart"}],[{"text":"⬆️ Update updater","callback_data":"cmd_self_update"}]]}'
+
+# Send the default menu (check version / restart / self-update)
 send_default_menu() {
-  local router_hostname kb text
+  local router_hostname text
   router_hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "$FALLBACK_HOSTNAME")
-  kb='{"inline_keyboard":[[{"text":"🔍 Check version","callback_data":"cmd_check"}],[{"text":"🔄 Restart podkop","callback_data":"cmd_restart"}]]}'
   text="<b>Podkop Updater</b> on <b>${router_hostname}</b>"
 
   if [ -n "$INSTALLED_MAIN_VERSION" ]; then
     text="${text}\nInstalled: ${INSTALLED_MAIN_VERSION}"
   fi
 
-  send_or_edit "$MENU_MSG_ID" "$text" "$kb"
+  send_or_edit "$MENU_MSG_ID" "$text" "$KB_DEFAULT"
   UPDATE_AVAILABLE=0
   PENDING_LATEST_VERSION=""
 }
@@ -381,6 +384,34 @@ do_restart_podkop() {
   fi
 }
 
+# Update the updater script itself and restart daemon
+do_self_update() {
+  local updater_path new_script
+  updater_path=$(readlink -f "$0" 2>/dev/null || echo "/usr/bin/podkop_updater.sh")
+
+  log "Self-update: downloading latest updater script"
+  tg_send "Updating updater script..."
+
+  new_script=$(curl -sfL "$SELF_UPDATE_URL" 2>>"$LOG_FILE") || new_script=$(wget -O - "$SELF_UPDATE_URL" 2>>"$LOG_FILE")
+  if [ -z "$new_script" ]; then
+    log "Error: Failed to download updater script"
+    tg_send "Failed to download updater script"
+    return 1
+  fi
+
+  printf '%s\n' "$new_script" > "$updater_path"
+  chmod +x "$updater_path"
+  log "Self-update: script updated at $updater_path"
+  tg_send "Updater script updated. Restarting daemon..."
+
+  # Restart via init.d if available, otherwise exec
+  if [ -f /etc/init.d/podkop_updater ]; then
+    /etc/init.d/podkop_updater restart >> "$LOG_FILE" 2>&1
+  else
+    exec "$updater_path" --daemon
+  fi
+}
+
 # =============================================================================
 # Daemon Mode
 # =============================================================================
@@ -457,11 +488,11 @@ daemon_loop() {
                 send_update_menu
               else
                 send_or_edit "$MENU_MSG_ID" "No updates available.\nInstalled: ${INSTALLED_MAIN_VERSION}\nLatest: ${LATEST_VERSION}" \
-                  '{"inline_keyboard":[[{"text":"🔍 Check version","callback_data":"cmd_check"}],[{"text":"🔄 Restart podkop","callback_data":"cmd_restart"}]]}'
+                  "$KB_DEFAULT"
               fi
             else
               send_or_edit "$MENU_MSG_ID" "Failed to check for updates. Check logs." \
-                '{"inline_keyboard":[[{"text":"🔍 Check version","callback_data":"cmd_check"}],[{"text":"🔄 Restart podkop","callback_data":"cmd_restart"}]]}'
+                "$KB_DEFAULT"
             fi
             last_auto_check=$(date +%s)
             ;;
@@ -478,6 +509,9 @@ daemon_loop() {
             else
               send_default_menu
             fi
+            ;;
+          cmd_self_update)
+            do_self_update
             ;;
           cmd_cancel)
             log "Update cancelled by user"
