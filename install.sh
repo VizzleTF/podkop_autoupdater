@@ -190,7 +190,18 @@ if [ -f "$UPDATER_PATH" ] && [ -n "$EXISTING_BOT_TOKEN" ] && [ -n "$EXISTING_CHA
       download_file $UPDATER_URL $UPDATER_PATH
       chmod +x $UPDATER_PATH
       echo "Script updated. UCI configuration (/etc/config/${UCI_PKG}) preserved."
-      echo "Installation complete! The script is ready to use."
+      # Restart daemon if init.d service exists and is enabled
+      if [ -f "$INITD_PATH" ]; then
+        echo "Restarting daemon service..."
+        "$INITD_PATH" stop > /dev/null 2>&1
+        sleep 1
+        # Ensure init.d service is set up (in case it was from an older version)
+        setup_initd_service
+        "$INITD_PATH" enable
+        "$INITD_PATH" start
+        echo "Daemon restarted."
+      fi
+      echo "Installation complete!"
       exit 0
       ;;
     1|*)
