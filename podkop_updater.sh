@@ -513,7 +513,8 @@ daemon_loop() {
     now=$(date +%s)
     if [ $((now - last_auto_check)) -ge "$check_interval_secs" ]; then
       log "Running periodic version check"
-      if do_version_check && [ "$UPDATE_AVAILABLE" -eq 1 ]; then
+      old_pending="$PENDING_LATEST_VERSION"
+      if do_version_check && [ "$UPDATE_AVAILABLE" -eq 1 ] && [ "$PENDING_LATEST_VERSION" != "$old_pending" ]; then
         send_update_menu
       fi
       last_auto_check=$now
