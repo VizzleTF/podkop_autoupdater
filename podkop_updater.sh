@@ -223,7 +223,9 @@ tg_answer_callback() {
 
 # Send or edit a message with inline keyboard
 send_or_edit() {
-  local msg_id="$1" text="$2" keyboard="$3"
+  local msg_id="$1" text keyboard
+  text=$(printf '%b' "$2")
+  keyboard="$3"
   local response
 
   if [ -n "$msg_id" ] && [ "$msg_id" != "null" ]; then
