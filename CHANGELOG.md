@@ -20,6 +20,10 @@
   - **tier3** — Emergency hardcoded Telegram IPs (`149.154.167.220`, `149.154.166.110`, `91.108.4.249`)
 - Auto-detection of Podkop mixed proxy IP/port from UCI and sing-box config.
 
+### Fixed
+- **Transport layer rewrite** — added sticky route mechanism, `--connect-timeout` / `-k` flags, and proper 3-arg `tg_api` calls. Fixes buttons not responding after the first interaction and constant fallback to emergency IPs.
+- **Check version button** — added timestamp to response text so repeated presses always update the message (avoids Telegram "message is not modified" error).
+
 ### Changed
 - Refactored main flow into reusable functions (`do_version_check`, `do_update`, `do_restart_podkop`, `do_dns_check`).
 - `install.sh` default mode changed from cron (mode 3) to daemon (mode 4).
