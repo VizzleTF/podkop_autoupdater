@@ -4,7 +4,7 @@
 # Downloads, configures, and optionally schedules podkop_updater.sh on OpenWrt
 
 # Constants
-UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh"  # URL to download the updater script
+UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/podkop_updater.sh"  # URL to download the updater script
 UPDATER_PATH="/usr/bin/podkop_updater.sh"  # Installation path for the updater script
 INITD_PATH="/etc/init.d/podkop_updater"  # Init.d service script path
 DEFAULT_CHECK_INTERVAL=6  # Default auto-check interval in hours for daemon mode
