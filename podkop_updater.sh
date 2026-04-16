@@ -386,20 +386,31 @@ do_restart_podkop() {
 
 # Update the updater script itself and restart daemon
 do_self_update() {
-  local updater_path new_script
+  local updater_path tmp_script current_hash new_hash
   updater_path=$(readlink -f "$0" 2>/dev/null || echo "/usr/bin/podkop_updater.sh")
+  tmp_script="/tmp/podkop_updater_new.sh"
 
   log "Self-update: downloading latest updater script"
-  tg_send "Updating updater script..."
 
-  new_script=$(curl -sfL "$SELF_UPDATE_URL" 2>>"$LOG_FILE") || new_script=$(wget -O - "$SELF_UPDATE_URL" 2>>"$LOG_FILE")
-  if [ -z "$new_script" ]; then
+  curl -sfL -o "$tmp_script" "$SELF_UPDATE_URL" 2>>"$LOG_FILE" || wget -O "$tmp_script" "$SELF_UPDATE_URL" >>"$LOG_FILE" 2>&1
+  if [ ! -s "$tmp_script" ]; then
     log "Error: Failed to download updater script"
     tg_send "Failed to download updater script"
+    rm -f "$tmp_script"
     return 1
   fi
 
-  printf '%s\n' "$new_script" > "$updater_path"
+  current_hash=$(md5sum "$updater_path" 2>/dev/null | cut -d' ' -f1)
+  new_hash=$(md5sum "$tmp_script" 2>/dev/null | cut -d' ' -f1)
+
+  if [ "$current_hash" = "$new_hash" ]; then
+    log "Self-update: already up to date"
+    send_or_edit "$MENU_MSG_ID" "Updater is already up to date.\nChecked: $(date +%H:%M:%S)" "$KB_DEFAULT"
+    rm -f "$tmp_script"
+    return 0
+  fi
+
+  mv "$tmp_script" "$updater_path"
   chmod +x "$updater_path"
   log "Self-update: script updated at $updater_path"
   tg_send "Updater script updated. Restarting daemon..."
@@ -483,15 +494,16 @@ daemon_loop() {
 
         case "$cb_data" in
           cmd_check)
+            check_time=$(date +%H:%M:%S)
             if do_version_check; then
               if [ "$UPDATE_AVAILABLE" -eq 1 ]; then
                 send_update_menu
               else
-                send_or_edit "$MENU_MSG_ID" "No updates available.\nInstalled: ${INSTALLED_MAIN_VERSION}\nLatest: ${LATEST_VERSION}" \
+                send_or_edit "$MENU_MSG_ID" "No updates available.\nInstalled: ${INSTALLED_MAIN_VERSION}\nLatest: ${LATEST_VERSION}\nChecked: ${check_time}" \
                   "$KB_DEFAULT"
               fi
             else
-              send_or_edit "$MENU_MSG_ID" "Failed to check for updates. Check logs." \
+              send_or_edit "$MENU_MSG_ID" "Failed to check for updates. Check logs.\nChecked: ${check_time}" \
                 "$KB_DEFAULT"
             fi
             last_auto_check=$(date +%s)
