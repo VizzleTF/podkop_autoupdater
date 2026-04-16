@@ -383,7 +383,7 @@ do_update() {
   log "Update script executed successfully"
 
   do_dns_check
-  tg_send "Update to version $PENDING_LATEST_VERSION completed.\n$DNS_CHECK_RESULT"
+  send_or_edit "$MENU_MSG_ID" "Update to ${PENDING_LATEST_VERSION} completed.\n$DNS_CHECK_RESULT" "$KB_DEFAULT"
 
   # Re-read installed version after update
   INSTALLED_VERSION=$(opkg info podkop 2>/dev/null | grep '^Version:' | cut -d' ' -f2)
@@ -399,15 +399,15 @@ do_update() {
 # Restart podkop service
 do_restart_podkop() {
   log "Restarting podkop..."
-  tg_send "Restarting podkop..."
+  send_or_edit "$MENU_MSG_ID" "Restarting podkop..." '{"inline_keyboard":[]}'
 
   if /etc/init.d/podkop restart >> "$LOG_FILE" 2>&1; then
     log "Podkop restarted successfully"
     do_dns_check
-    tg_send "Podkop restarted.\n$DNS_CHECK_RESULT"
+    send_or_edit "$MENU_MSG_ID" "Podkop restarted.\n$DNS_CHECK_RESULT" "$KB_DEFAULT"
   else
     log "Error: Failed to restart podkop"
-    tg_send "Failed to restart podkop"
+    send_or_edit "$MENU_MSG_ID" "Failed to restart podkop" "$KB_DEFAULT"
   fi
 }
 
@@ -537,14 +537,12 @@ daemon_loop() {
             ;;
           cmd_restart)
             do_restart_podkop
-            send_default_menu
             ;;
           cmd_update)
             if [ "$UPDATE_AVAILABLE" -eq 1 ] && [ -n "$PENDING_LATEST_VERSION" ]; then
               send_or_edit "$MENU_MSG_ID" "Updating to ${PENDING_LATEST_VERSION}..." \
                 '{"inline_keyboard":[]}'
               do_update
-              send_default_menu
             else
               send_default_menu
             fi
