@@ -422,7 +422,7 @@ do_self_update() {
   curl -sfL -o "$tmp_script" "$SELF_UPDATE_URL" 2>>"$LOG_FILE" || wget -O "$tmp_script" "$SELF_UPDATE_URL" >>"$LOG_FILE" 2>&1
   if [ ! -s "$tmp_script" ]; then
     log "Error: Failed to download updater script"
-    tg_send "Failed to download updater script"
+    send_or_edit "$MENU_MSG_ID" "Failed to download updater script" "$KB_DEFAULT"
     rm -f "$tmp_script"
     return 1
   fi
@@ -521,6 +521,7 @@ daemon_loop() {
 
         case "$cb_data" in
           cmd_check)
+            send_or_edit "$MENU_MSG_ID" "Checking for updates..." '{"inline_keyboard":[]}'
             check_time=$(date +%H:%M:%S)
             if do_version_check; then
               if [ "$UPDATE_AVAILABLE" -eq 1 ]; then
@@ -548,6 +549,7 @@ daemon_loop() {
             fi
             ;;
           cmd_self_update)
+            send_or_edit "$MENU_MSG_ID" "Checking for updater updates..." '{"inline_keyboard":[]}'
             do_self_update
             ;;
           cmd_cancel)
