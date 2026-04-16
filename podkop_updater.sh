@@ -52,7 +52,7 @@ DEFAULT_CHECK_INTERVAL=6
 TG_EMERGENCY_IPS="149.154.167.220 149.154.166.110 91.108.4.249"
 SOCKS_PORT=""
 SOCKS_IP=""
-CURRENT_TIER=""
+CURRENT_TIER="tier2"
 
 # Daemon state
 MENU_MSG_ID=""
@@ -161,33 +161,58 @@ detect_socks_proxy() {
 
 # Try a single curl request, return 0 on success
 _try_curl() {
-  local extra_args="$1" timeout="$2" url="$3"; shift 3
-  curl -sf --max-time "$timeout" $extra_args "$url" "$@" 2>/dev/null
+  local proxy_args="$1" max_time="$2" connect_timeout="$3" url="$4"
+  shift 4
+  curl -s -k --connect-timeout "$connect_timeout" --max-time "$max_time" $proxy_args "$url" "$@" 2>/dev/null
 }
 
 # Tiered Telegram API call: SOCKS → Direct → Emergency IPs
+# Usage: tg_api <endpoint> [max_time] [connect_timeout] [extra curl args...]
 tg_api() {
-  local endpoint="$1" timeout="${2:-$CURL_TIMEOUT}" url result eip
-  shift 2 2>/dev/null || shift
+  local endpoint="$1" max_time="${2:-$CURL_TIMEOUT}" connect_timeout="${3:-5}" url result eip
+  shift 3 2>/dev/null || shift 2 2>/dev/null || shift
   url="${TELEGRAM_API_BASE}${BOT_TOKEN}/${endpoint}"
 
+  # Sticky: try last working tier first with short connect timeout
+  case "$CURRENT_TIER" in
+    tier1)
+      if [ -n "$SOCKS_IP" ] && [ -n "$SOCKS_PORT" ]; then
+        if result=$(_try_curl "-x socks5h://${SOCKS_IP}:${SOCKS_PORT}" "$max_time" "$connect_timeout" "$url" "$@"); then
+          echo "$result"; return 0
+        fi
+      fi
+      ;;
+    tier2)
+      if result=$(_try_curl "" "$max_time" "$connect_timeout" "$url" "$@"); then
+        echo "$result"; return 0
+      fi
+      ;;
+    tier3_*)
+      eip=${CURRENT_TIER#tier3_}
+      if result=$(_try_curl "--resolve api.telegram.org:443:${eip}" "$max_time" "$connect_timeout" "$url" "$@"); then
+        echo "$result"; return 0
+      fi
+      ;;
+  esac
+
+  # Full discovery cascade
   # tier1: Podkop SOCKS5
   if [ -n "$SOCKS_IP" ] && [ -n "$SOCKS_PORT" ]; then
-    if result=$(_try_curl "-x socks5h://${SOCKS_IP}:${SOCKS_PORT}" "$timeout" "$url" "$@"); then
+    if result=$(_try_curl "-x socks5h://${SOCKS_IP}:${SOCKS_PORT}" "$max_time" "$connect_timeout" "$url" "$@"); then
       [ "$CURRENT_TIER" != "tier1" ] && { CURRENT_TIER="tier1"; log "Transport: using Podkop SOCKS5 (${SOCKS_IP}:${SOCKS_PORT})"; }
       echo "$result"; return 0
     fi
   fi
 
   # tier2: Direct
-  if result=$(_try_curl "" "$timeout" "$url" "$@"); then
+  if result=$(_try_curl "" "$max_time" "5" "$url" "$@"); then
     [ "$CURRENT_TIER" != "tier2" ] && { CURRENT_TIER="tier2"; log "Transport: using direct connection"; }
     echo "$result"; return 0
   fi
 
   # tier3: Emergency hardcoded IPs
   for eip in $TG_EMERGENCY_IPS; do
-    if result=$(_try_curl "--resolve api.telegram.org:443:${eip}" "$timeout" "$url" "$@"); then
+    if result=$(_try_curl "--resolve api.telegram.org:443:${eip}" "$max_time" "5" "$url" "$@"); then
       [ "$CURRENT_TIER" != "tier3_${eip}" ] && { CURRENT_TIER="tier3_${eip}"; log "Transport: using emergency IP ${eip}"; }
       echo "$result"; return 0
     fi
@@ -200,7 +225,7 @@ tg_send() {
   local msg prefix=""
   [ "$DRY_RUN" -eq 1 ] && prefix="[DRY RUN] "
   msg=$(printf '%b' "${prefix}$1")
-  SEND_RESPONSE=$(tg_api "sendMessage" "$CURL_TIMEOUT" -X POST -d "chat_id=$CHAT_ID" --data-urlencode "text=$msg")
+  SEND_RESPONSE=$(tg_api "sendMessage" "$CURL_TIMEOUT" "5" -X POST -d "chat_id=$CHAT_ID" --data-urlencode "text=$msg")
   [ $? -ne 0 ] && { log "Error: Failed to send Telegram notification (network error)"; return 1; }
   echo "$SEND_RESPONSE" | grep -q '"ok":true' && { log "Sent Telegram notification: $1"; return 0; }
   log "Error: Failed to send Telegram notification"; return 1
@@ -216,7 +241,7 @@ check_reply() {
 }
 
 tg_answer_callback() {
-  tg_api "answerCallbackQuery" "$CURL_TIMEOUT" -X POST \
+  tg_api "answerCallbackQuery" "$CURL_TIMEOUT" "5" -X POST \
     -d "callback_query_id=$1" >/dev/null 2>&1
 }
 
@@ -232,7 +257,7 @@ send_or_edit() {
   local response
 
   if [ -n "$msg_id" ] && [ "$msg_id" != "null" ]; then
-    response=$(tg_api "editMessageText" "$CURL_TIMEOUT" -X POST \
+    response=$(tg_api "editMessageText" "$CURL_TIMEOUT" "5" -X POST \
       -d "chat_id=$CHAT_ID" \
       -d "message_id=$msg_id" \
       -d "parse_mode=HTML" \
@@ -245,7 +270,7 @@ send_or_edit() {
     log "Warning: editMessageText failed, sending new message"
   fi
 
-  response=$(tg_api "sendMessage" "$CURL_TIMEOUT" -X POST \
+  response=$(tg_api "sendMessage" "$CURL_TIMEOUT" "5" -X POST \
     -d "chat_id=$CHAT_ID" \
     -d "parse_mode=HTML" \
     --data-urlencode "text=$text" \
@@ -470,18 +495,13 @@ daemon_loop() {
   while true; do
     rotate_log
 
-    if ! get_updates=$(tg_api "getUpdates?offset=$OFFSET" "$CURL_TIMEOUT"); then
+    if ! get_updates=$(tg_api "getUpdates?offset=$OFFSET&timeout=$LONG_POLL_TIMEOUT" "$((LONG_POLL_TIMEOUT + 15))" "4"); then
       log "Warning: Telegram polling failed, retrying..."
-      sleep 5
+      sleep 2
       continue
     fi
 
     update_count=$(echo "$get_updates" | jq '.result | length')
-
-    # Short polling: sleep if no updates to avoid hammering the API
-    if [ "$update_count" -eq 0 ]; then
-      sleep 2
-    fi
 
     i=0
     while [ "$i" -lt "$update_count" ]; do
@@ -657,7 +677,7 @@ if [ "$UPDATE_AVAILABLE" -eq 1 ]; then
     msg_prefix=$([ "$DRY_RUN" -eq 1 ] && echo '[DRY RUN] ')
     router_hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "$FALLBACK_HOSTNAME")
     reply_markup='{"inline_keyboard":[[{"text":"✅ Update","callback_data":"yes"},{"text":"❌ Cancel","callback_data":"no"}]]}'
-    if ! SEND_RESPONSE=$(tg_api "sendMessage" "$CURL_TIMEOUT" -X POST \
+    if ! SEND_RESPONSE=$(tg_api "sendMessage" "$CURL_TIMEOUT" "5" -X POST \
       -d "chat_id=$CHAT_ID" \
       -d "parse_mode=HTML" \
       --data-urlencode "text=${msg_prefix}<b>New version on router ${router_hostname} available:</b> $LATEST_VERSION. Current: $INSTALLED_MAIN_VERSION. Choose an action:" \
@@ -684,7 +704,7 @@ if [ "$UPDATE_AVAILABLE" -eq 1 ]; then
       [ "$DRY_RUN" -eq 1 ] && printf "\r         Polling... (%ds elapsed, offset: %d)   " "$(( $(date +%s) - DRY_START ))" "$OFFSET"
       [ "$DRY_RUN" -eq 1 ] && [ "$(( $(date +%s) - DRY_START ))" -ge "$POLL_TIMEOUT" ] && break
 
-      if ! GET_UPDATES=$(tg_api "getUpdates?offset=$OFFSET&timeout=$LONG_POLL_TIMEOUT" "$((LONG_POLL_TIMEOUT + 5))"); then
+      if ! GET_UPDATES=$(tg_api "getUpdates?offset=$OFFSET&timeout=$LONG_POLL_TIMEOUT" "$((LONG_POLL_TIMEOUT + 15))" "4"); then
         [ "$DRY_RUN" -eq 1 ] && printf "\n         Warning: polling failed, retrying...\n"
         log "Warning: Telegram polling failed, retrying..."; sleep 5; continue
       fi
