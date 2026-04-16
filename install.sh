@@ -6,6 +6,8 @@
 # Constants
 UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/refs/heads/main/podkop_updater.sh"  # URL to download the updater script
 UPDATER_PATH="/usr/bin/podkop_updater.sh"  # Installation path for the updater script
+INITD_PATH="/etc/init.d/podkop_updater"  # Init.d service script path
+DEFAULT_CHECK_INTERVAL=6  # Default auto-check interval in hours for daemon mode
 LOG_FILE="/tmp/podkop_update.log"  # Log file for update operations
 UCI_PKG="podkop_updater"           # UCI package name for credentials storage
 UCI_SEC="settings"                 # UCI section name
@@ -43,6 +45,46 @@ setup_cron_job() {
   sed -i "/podkop_updater.sh/d" "$CRON_FILE"
   echo "0 */$cron_hours * * * $updater_command" >> "$CRON_FILE"
   $CRON_SERVICE restart > /dev/null 2>&1
+}
+
+remove_cron_job() {
+  if [ -f "$CRON_FILE" ]; then
+    sed -i "/podkop_updater.sh/d" "$CRON_FILE"
+    $CRON_SERVICE restart > /dev/null 2>&1
+  fi
+}
+
+setup_initd_service() {
+  cat > "$INITD_PATH" <<'INITD_EOF'
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/podkop_updater.sh --daemon
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 0
+    procd_set_param stderr 0
+    procd_close_instance
+}
+INITD_EOF
+  chmod +x "$INITD_PATH"
+}
+
+stop_daemon() {
+  if [ -f "$INITD_PATH" ]; then
+    "$INITD_PATH" stop > /dev/null 2>&1
+    "$INITD_PATH" disable > /dev/null 2>&1
+  fi
+  # Kill any running daemon instances
+  local pid
+  if [ -f "/tmp/podkop_updater.lock/pid" ]; then
+    pid=$(cat "/tmp/podkop_updater.lock/pid" 2>/dev/null)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  fi
 }
 
 validate_cron_hours() {
@@ -166,15 +208,19 @@ echo "Downloaded and set executable: $UPDATER_PATH"
 echo "Choose update mode:"
 echo "1) Manual (run via console, no cron)"
 echo "2) Automatic (run via cron, no Telegram confirmation)"
-echo "3) Automatic with Telegram bot confirmation (default, run via cron)"
-echo "Enter 1, 2, or 3 (default: 3):"
+echo "3) Automatic with Telegram bot confirmation (run via cron)"
+echo "4) Telegram bot with persistent menu (default, daemon mode)"
+echo "Enter 1, 2, 3, or 4 (default: 4):"
 read -r UPDATE_MODE
 case "$UPDATE_MODE" in
   1)
     echo "Manual mode selected. Script installed without cron or Telegram configuration."
+    stop_daemon
+    remove_cron_job
     ;;
   2)
     echo "Automatic mode selected."
+    stop_daemon
     # Prompt for cron frequency
     echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
     read -r CRON_HOURS
@@ -183,8 +229,9 @@ case "$UPDATE_MODE" in
     setup_cron_job "$CRON_HOURS" "$UPDATER_PATH --force"
     echo "Cron job configured for automatic updates."
     ;;
-  3|*)
+  3)
     echo "Automatic with Telegram bot confirmation selected."
+    stop_daemon
     # Prompt for Telegram bot token
     echo "Please enter your Telegram bot token (obtained from @BotFather):"
     read -r BOT_TOKEN
@@ -217,6 +264,48 @@ case "$UPDATE_MODE" in
     setup_cron_job "$CRON_HOURS" "$UPDATER_PATH"
     echo "Cron job configured for Telegram-confirmed updates."
     ;;
+  4|*)
+    echo "Telegram bot with persistent menu (daemon mode) selected."
+    # Prompt for Telegram bot token
+    echo "Please enter your Telegram bot token (obtained from @BotFather):"
+    read -r BOT_TOKEN
+    if [ -z "$BOT_TOKEN" ]; then
+      exit_with_error "Bot token cannot be empty. Exiting."
+    fi
+    # Prompt for Telegram chat ID
+    echo "Please enter your Telegram chat ID (obtained from @get_id_bot or similar):"
+    read -r CHAT_ID
+    if [ -z "$CHAT_ID" ]; then
+      exit_with_error "Chat ID cannot be empty. Exiting."
+    fi
+    # Save credentials to UCI
+    echo "Saving credentials to UCI (/etc/config/${UCI_PKG})..."
+    [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
+    uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null
+    uci set "${UCI_PKG}.${UCI_SEC}=${UCI_SEC}"
+    uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${BOT_TOKEN}"
+    uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT_ID}"
+    # Prompt for auto-check interval
+    echo "How often should the bot auto-check for updates (in hours, e.g., 6 for every 6 hours)?"
+    read -r CHECK_INTERVAL
+    CHECK_INTERVAL=$(validate_cron_hours "${CHECK_INTERVAL:-$DEFAULT_CHECK_INTERVAL}")
+    uci set "${UCI_PKG}.${UCI_SEC}.check_interval=${CHECK_INTERVAL}"
+    uci commit "${UCI_PKG}"
+    if [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token)" != "$BOT_TOKEN" ] || \
+       [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id)" != "$CHAT_ID" ]; then
+      exit_with_error "Failed to save UCI configuration."
+    fi
+    # Remove cron job if present
+    remove_cron_job
+    # Stop any existing daemon
+    stop_daemon
+    # Install and start init.d service
+    echo "Setting up init.d service..."
+    setup_initd_service
+    "$INITD_PATH" enable
+    "$INITD_PATH" start
+    echo "Daemon service installed and started."
+    ;;
 esac
 
 # Step 5: Verify network access
@@ -224,7 +313,7 @@ echo "Verifying network access to GitHub and Telegram APIs..."
 if ! curl -s $GITHUB_API_URL > /dev/null; then
   echo "Warning: Cannot reach GitHub API. The script may fail to check for updates."
 fi
-if [ "$UPDATE_MODE" = "3" ] || [ -z "$UPDATE_MODE" ]; then
+if [ "$UPDATE_MODE" = "3" ] || [ "$UPDATE_MODE" = "4" ] || [ -z "$UPDATE_MODE" ]; then
   if ! curl -s "${TELEGRAM_API_BASE}$BOT_TOKEN/getMe" | grep -q '"ok":true'; then
     echo "Warning: Cannot reach Telegram API or invalid bot token. The script may fail to send notifications."
   fi
@@ -237,13 +326,23 @@ if [ "$UPDATE_MODE" = "1" ]; then
   echo "Run manually with: $UPDATER_PATH"
 elif [ "$UPDATE_MODE" = "2" ]; then
   echo "Automatic updates are scheduled every $CRON_HOURS hour(s)."
-else
+elif [ "$UPDATE_MODE" = "3" ]; then
   echo "Telegram-confirmed updates are scheduled every $CRON_HOURS hour(s)."
   echo "Reply 'yes' to Telegram messages to update or 'no' to cancel."
+else
+  echo "Telegram bot daemon is running with persistent menu."
+  echo "Auto-check interval: every $CHECK_INTERVAL hour(s)."
+  echo "Use buttons in Telegram to check for updates or restart podkop."
+  echo ""
+  echo "Service management:"
+  echo "  $INITD_PATH start    - Start daemon"
+  echo "  $INITD_PATH stop     - Stop daemon"
+  echo "  $INITD_PATH restart  - Restart daemon"
 fi
 echo "Logs will be written to $LOG_FILE."
 echo ""
 echo "Available commands:"
-echo "  $UPDATER_PATH              - Run update check"
+echo "  $UPDATER_PATH              - Run update check (one-shot)"
 echo "  $UPDATER_PATH --dry-run    - Test full flow without making changes"
 echo "  $UPDATER_PATH --force      - Force update without Telegram confirmation"
+echo "  $UPDATER_PATH --daemon     - Run as persistent Telegram bot"

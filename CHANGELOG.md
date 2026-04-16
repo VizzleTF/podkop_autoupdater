@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Daemon mode (`--daemon`)** — persistent Telegram bot with inline menu:
+  - Two-button menu: "Check version" and "Restart podkop", always available in Telegram.
+  - When a new version is detected, menu switches to "Update" / "Cancel".
+  - Continuous long-polling loop with automatic reconnection on failure.
+  - Periodic auto-check for new versions (configurable interval via UCI `check_interval`).
+  - Security: only responds to the configured `CHAT_ID`.
+- **procd init.d service** (`/etc/init.d/podkop_updater`) for daemon mode:
+  - Auto-start on boot, automatic respawn on crash.
+  - Install via `install.sh` mode 4 (now the default).
+- **Restart podkop** button — restarts podkop service with DNS health check.
+- **PID-based lock** — stale lock detection and cleanup for daemon reliability.
+- **3-tier transport fallback** for Telegram API calls:
+  - **tier1** — Podkop SOCKS5 proxy (auto-detected from `/etc/sing-box/config.json`, default port `2080`)
+  - **tier2** — Direct connection
+  - **tier3** — Emergency hardcoded Telegram IPs (`149.154.167.220`, `149.154.166.110`, `91.108.4.249`)
+- Auto-detection of Podkop mixed proxy IP/port from UCI and sing-box config.
+- Transport tier logged on each switch; dry-run mode prints the active tier.
+
+### Changed
+- Refactored main flow into reusable functions (`do_version_check`, `do_update`, `do_restart_podkop`, `do_dns_check`).
+- `install.sh` default mode changed from cron (mode 3) to daemon (mode 4).
+- `handle_error()` returns instead of exiting in daemon mode.
+
+---
+
 ## 2026-04-16
 
 ### Changed
