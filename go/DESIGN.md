@@ -1,253 +1,157 @@
-# podkop_updater (Go daemon) — Design
+# podkop_updater architecture
 
-## Context
+A single Go binary that runs as a long-lived procd service on the router
+and polls Telegram for inline-menu commands. Configuration lives in UCI
+(`/etc/config/podkop_updater`); state in memory; logs in
+`/tmp/podkop_update.log`.
 
-Replacement for `../podkop_updater.sh` (~790 lines bash, daemon mode). Same external behavior, same UCI config, same procd integration. Goal: fix structural problems (P1–P6 in audit), reduce external runtime dependencies (`jq`, `curl`, `wget`, `nslookup`), enable real testing.
-
-**Out of scope (this iteration):**
-- LuCI web UI page (separate concern, future phase)
-- Legacy cron modes (1, 2, 3 in current installer) — daemon is the default and most-used path; cron modes covered by `podkop_updater check` and `podkop_updater force-update` subcommands
-
-## Non-goals
-
-- Binary size below 2 MB (already measured ~1.7 MB UPX on mipsle, acceptable)
-- Removing shell-out for opkg/apk/uci (idiomatic on OpenWrt, no benefit to reimplement)
-- Webhook mode (long polling sufficient, simpler)
-
-## Architecture overview
+## Modules
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│ cmd/podkop_updater/main.go                               │
-│   wire dependencies, parse flags (--daemon, check,       │
-│   force-update, self-update), call subcommand            │
-└──────────┬───────────────────────────────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────────────────┐
-│ internal/                                                │
-│                                                          │
-│  config/  ──── UCI read via `uci -q get` exec            │
-│                                                          │
-│  transport/ ── http.RoundTripper with sticky-tier        │
-│                fallback (SOCKS5 → direct → emergency IP) │
-│                                                          │
-│  telegram/ ─── thin wrapper over github.com/go-telegram/ │
-│                bot, injecting transport.RoundTripper     │
-│                                                          │
-│  updater/ ──── GitHub API release fetch, semver compare, │
-│                run podkop install.sh                     │
-│                                                          │
-│  service/ ──── /etc/init.d/podkop restart, DNS check     │
-│                                                          │
-│  selfupdate/ ─ atomic binary swap with .bak rollback     │
-│                                                          │
-│  logger/ ───── log rotation, leveled output to LOG_FILE  │
-└──────────────────────────────────────────────────────────┘
+cmd/podkop_updater/main.go        Wire dependencies; PID-file lock;
+                                  signal handling; periodic IP refresh.
+
+internal/config/                  Load UCI settings: bot_token, chat_id,
+                                  check_interval (hours), emergency_ips
+                                  (space-separated string). SaveEmergencyIPs
+                                  persists the discovered list back to UCI.
+
+internal/logger/                  File logger with in-place rotation when
+                                  the log crosses a soft line limit
+                                  (~200 lines). Single global instance.
+
+internal/telegram/                Thin layer over github.com/go-telegram/bot.
+                                  Owns the one tracked menu message and its
+                                  state machine (default / busy / result /
+                                  update-available). Periodic version check
+                                  goroutine triggers a fresh notification
+                                  message when a new podkop release is
+                                  discovered. Orphan-message adoption: if
+                                  the user clicks an old menu, the bot
+                                  promotes that message to "tracked" and
+                                  deletes the previous one.
+
+internal/transport/               http.RoundTripper that walks tiers in
+                                  order on failure and stays sticky on
+                                  success. Tier 0 (SOCKS5 to podkop's
+                                  mixed inbound) is added only if the
+                                  podkop sing-box config exposes one;
+                                  tier 1 is direct; further tiers pin
+                                  api.telegram.org to specific IPs
+                                  (override DNS for that host only, SNI
+                                  preserved so TLS still validates).
+                                  discovery.go queries DoH (the endpoint
+                                  configured in podkop's UCI) for current
+                                  api.telegram.org A records, filtering
+                                  to known Telegram CIDRs.
+
+internal/service/                 podkop restart, DNS health check (polls
+                                  fakeip.podkop.fyi via 127.0.0.42 every
+                                  2s up to a 60s budget), SOCKS5 endpoint
+                                  detection from podkop UCI + sing-box
+                                  config, and the Runner that implements
+                                  telegram.UpdateRunner.
+
+internal/selfupdate/              Atomic binary replacement:
+                                  current -> current.bak, new -> current,
+                                  then exit so procd respawns. The .bak
+                                  is removed on the next clean startup
+                                  (CleanupBackup).
+
+internal/updater/                 GitHub release fetch (LatestRelease for
+                                  podkop, LatestSelfRelease for
+                                  podkop_autoupdater itself), semver
+                                  comparison, installed-version reader
+                                  (opkg or apk; honors PODKOP_FAKE_INSTALLED
+                                  env for testing), and the install.sh
+                                  runner that pipes "y\ny\n" into the
+                                  upstream installer.
 ```
 
-## External dependencies
+## Transport cascade
 
-Single Go module dependency for HTTP+TLS+JSON+Telegram bot:
+`TieredTransport.RoundTrip` snapshots the tier slice under a mutex, then
+iterates starting from the sticky index, wrapping around. On the first
+success it updates the sticky index. Tier rebuild
+(`RebuildEmergency`) preserves SOCKS5 and direct, replaces emergency
+entries, and resets sticky to 0.
 
-| Package | Purpose | Notes |
-|---------|---------|-------|
-| `github.com/go-telegram/bot` v1.20.0+ | Telegram Bot API client | context-aware, idiomatic, used in prototype, all Bot API 7.x methods |
-| `golang.org/x/net/proxy` | SOCKS5 dialer | stdlib-adjacent |
-| stdlib `net/http`, `encoding/json`, `crypto/tls`, `context` | rest | — |
+Defaults:
+- per-tier connect timeout 3s, TLS handshake 5s
+- emergency IP refresh every 24h (initial run 30s after startup)
+- discovered IPs merged with compiled defaults so a single-record DoH
+  reply doesn't shrink coverage
 
-**Deliberately NOT used:** `cobra`, `viper`, `logrus`, `zap`, `goreleaser`. Avoid bloat — single binary should stay under 2 MB UPX'd. Use stdlib `flag`, stdlib `log/slog`.
+## Self-update flow
 
-## Module / package decisions
+1. User taps "Обновить updater".
+2. Runner.RunSelfUpdate downloads `releases/latest/download/podkop_updater-<arch>`.
+3. Atomic rename: current → .bak, new → current.
+4. `time.AfterFunc(3s, os.Exit)` to give the bot time to draw the
+   "перезапуск через 3с..." status message.
+5. procd respawns the new binary.
+6. On startup the new binary calls `CleanupBackup` to remove the .bak.
+7. If the new binary failed to start (procd's respawn budget exhausted)
+   the user can manually restore: `mv podkop_updater.bak podkop_updater`
+   and start the service.
 
-### Single binary, multiple subcommands (no separate binaries)
-
-```
-podkop_updater --daemon           # main mode (procd)
-podkop_updater check              # one-shot check, exit 0/1
-podkop_updater force-update       # check + update without TG confirm
-podkop_updater self-update        # download new binary, restart
-podkop_updater dry-run            # simulate flow
-```
-
-Implementation: dispatch on `os.Args[1]` in `main.go`. Total ~50 lines of CLI scaffolding, no `cobra`.
-
-### Config (UCI)
-
-`internal/config/uci.go`:
-```go
-type Config struct {
-    BotToken      string
-    ChatID        int64
-    CheckInterval time.Duration
-}
-
-func Load() (*Config, error) {
-    // exec.Command("uci", "-q", "get", "podkop_updater.settings.bot_token")
-}
-```
-Shell-out to `uci`. No native parser — UCI format has edge cases (lists, includes) we don't need to handle.
-
-### Transport (`internal/transport`)
-
-Custom `http.RoundTripper` wrapping multiple `http.Transport` instances:
-
-```go
-type TieredTransport struct {
-    mu       sync.Mutex
-    current  tier             // sticky, last-known good
-    tiers    []tier           // ordered: SOCKS, direct, emergency IPs
-    emergencyIPs []string
-    socksAddr string
-}
-
-func (t *TieredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-    // 1. Try sticky tier with short connect-timeout (5s)
-    // 2. If fail, walk cascade, set new sticky on success
-    // 3. Return last error if all fail
-}
-```
-
-Each tier is a `*http.Transport` with custom `DialContext`:
-- SOCKS5 tier: `proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct).Dial`
-- Direct tier: stdlib default
-- Emergency IP tier: `func(ctx, network, addr) { addr = ip + ":443"; return d.DialContext(...) }` — SNI preserved by TLS layer
-
-Same `RoundTripper` injected into:
-- Telegram bot's `http.Client`
-- GitHub API client
-- podkop install.sh downloader (`curl_pipe_sh()` equivalent)
-
-This solves P2 (sticky tier duplication) and P3 (transport tied to telegram only).
-
-### Self-update (`internal/selfupdate`)
-
-Atomic with rollback:
-```
-1. Download new bin → /tmp/podkop_updater.new
-2. Verify size > 0, exec bit settable
-3. Backup: rename /usr/bin/podkop_updater → /usr/bin/podkop_updater.bak
-4. Rename /tmp/podkop_updater.new → /usr/bin/podkop_updater
-5. Write rollback sentinel: /tmp/podkop_updater.update_pending
-6. Exit (procd respawn picks up new binary)
-7. On startup, if sentinel exists:
-     - Start health check timer (60s)
-     - If reaches normal poll loop → delete sentinel, delete .bak
-     - If crashes/exits before timer → procd respawn cycle ends:
-       installer-style watchdog OR cold rollback via init.d wrapper
-```
-
-For MVP: skip cold-rollback (rare case). Document `.bak` and rollback procedure for manual recovery. Solves P5.
-
-### Telegram (`internal/telegram`)
-
-Thin wrapper. Idiomatic usage of `go-telegram/bot`:
-
-```go
-type Bot struct {
-    bot     *bot.Bot
-    chatID  int64
-    menuMID int  // protected by mu
-    state   menuState
-    mu      sync.Mutex
-}
-
-// register handlers in Init()
-b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_check", bot.MatchTypeExact, b.onCheck)
-b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restart", bot.MatchTypeExact, b.onRestart)
-// ...
-```
-
-The lib handles long-polling, offset tracking, callback answering. Solves P1 (no manual jq pipelines per update).
-
-### Logger (`internal/logger`)
-
-stdlib `log/slog` with custom file handler:
-- Rotation: on each log call, check file size; if > 200 lines, truncate to last 100 (port from `rotate_log` 109-115 but atomic via rename)
-- Output: text format, prefix with timestamp
-- Single global `*slog.Logger`
-
-### Service ops (`internal/service`)
-
-`/etc/init.d/podkop restart` via `exec.Command`.
-DNS check via `net.Resolver` with custom Dial to `127.0.0.42:53` — no `nslookup` binary needed.
-**Critical fix for M5**: DNS check 60s wait runs in goroutine with `context.WithTimeout`. Daemon stays responsive to callbacks.
-
-## File layout
+## Telegram menu state machine
 
 ```
-go/
-├── go.mod
-├── go.sum
-├── DESIGN.md (this file)
-├── README.md (user-facing)
-├── Makefile                        # build, build-all, clean
-├── cmd/
-│   └── podkop_updater/
-│       └── main.go                 # CLI dispatch + wire
-├── internal/
-│   ├── config/uci.go
-│   ├── transport/
-│   │   ├── transport.go            # TieredTransport
-│   │   └── transport_test.go
-│   ├── telegram/
-│   │   ├── bot.go                  # init bot, register handlers
-│   │   ├── menu.go                 # send_or_edit, default/update menu
-│   │   └── handlers.go             # callback handlers
-│   ├── updater/
-│   │   ├── github.go               # latest release fetch
-│   │   ├── version.go              # semver compare, opkg/apk read
-│   │   ├── update.go               # run install.sh
-│   │   └── version_test.go
-│   ├── service/
-│   │   ├── podkop.go               # restart, dns check
-│   │   └── socks.go                # detect_socks_proxy port
-│   ├── selfupdate/
-│   │   └── selfupdate.go
-│   └── logger/
-│       └── logger.go
-├── scripts/
-│   ├── init.d/podkop_updater       # procd stub
-│   └── install.sh                  # arch-detect + GitHub release download
-scripts/init.d/         procd service stub
-scripts/install.sh      installer
-
-The CI workflow lives at the repo root (not in this subtree) so GitHub
-can discover it: ../.github/workflows/release.yml.
+        +----------+
+        | Default  |  (3 buttons)
+        +----+-----+
+             |
+             |   any check/restart/update press
+             v
+        +--------+
+        | Busy   |  (no buttons)
+        +---+----+
+            |
+            |   action returns status
+            v
+   +--------+-------+
+   | Result + ОК    |
+   +-+--------+-----+
+     |        |
+     | ОК     | (update available)
+     v        v
+   Default  +-----------------+
+            | Update available|  (single Обновить button)
+            +--+--------------+
+               |
+               |   Обновить
+               v
+            Busy → ... → Result
 ```
 
-## CI / release
+Periodic auto-find of a new podkop release deletes the current tracked
+menu and sends a fresh message in the Update-available state (so the
+user gets a notification, not a silent edit).
 
-`.github/workflows/release.yml` on tag push:
-- Matrix: `{amd64, arm64, armv7, mipsle-softfloat, mips-softfloat}`
-- Build with `-ldflags="-s -w" -trimpath`, `CGO_ENABLED=0`
-- Run UPX if available (skip mips-bigendian where UPX has issues)
-- Upload to release as `podkop_updater-${arch}`
-- `scripts/install.sh` downloads from `releases/latest/download/podkop_updater-${arch}`
+## Persistence
 
-## Testing strategy
+UCI keys under `podkop_updater.settings`:
 
-- Unit: `transport_test.go` (mock dialer, verify tier cascade), `version_test.go` (semver edge cases)
-- Integration: `httptest.Server` mocking Telegram API + GitHub API
-- Manual: deploy to qemu-mipsel + real router (post-MVP)
+| key             | type   | meaning                                   |
+|-----------------|--------|-------------------------------------------|
+| bot_token       | string | Telegram bot token (required)             |
+| chat_id         | int    | Telegram chat ID (required)               |
+| check_interval  | int    | hours between podkop version checks (default 6) |
+| emergency_ips   | string | space-separated IPs written by daemon     |
 
-## Implementation phases
+## Testing
 
-| Phase | Scope | Output |
-|-------|-------|--------|
-| **0** | Scaffolding (this commit) | DESIGN.md, folder layout, go.mod, stub main.go, Makefile, init.d stub |
-| **1** | Core daemon happy-path | UCI load, GitHub fetch, version compare, send menu, handle callbacks. Direct transport only. ~400 lines |
-| **2** | Tiered transport | SOCKS detection, custom RoundTripper, emergency IPs, sticky tier. ~150 lines + tests |
-| **3** | Update flow | `do_update` (run install.sh), `do_dns_check` async, `do_restart_podkop`. ~150 lines |
-| **4** | Self-update | atomic swap + .bak. ~100 lines |
-| **5** | CI + install.sh | release.yml matrix, arch-detect install. |
-| **6** | Hardware test | mipsle + aarch64 real routers |
+`PODKOP_FAKE_INSTALLED` env var overrides the result of
+`updater.InstalledVersion`. Useful for exercising the podkop update path
+without downgrading the real package.
 
-Estimated 3–5 days for phases 1–5. Phase 6 dependent on hardware availability.
+`go test ./...` covers semver normalization, comparison, and the tier
+cascade (mock RoundTrippers, sticky behavior, all-fail).
 
-## Open questions
+## CI
 
-- Use `slog` (Go 1.21+) — confirmed Go 1.25 available on dev box, OK
-- mips-bigendian: include in CI or skip? (lower-priority arch; defer)
-- Binary location on router: keep `/usr/bin/podkop_updater` (matches current install)
-- Migration path from bash version: install.sh detects existing `.sh` at `/usr/bin/podkop_updater.sh`, stops daemon, removes shell version, drops binary. UCI config preserved.
+`../.github/workflows/release.yml` builds a five-architecture matrix
+(amd64, arm64, armv7, mipsle softfloat, mips softfloat) on push of any
+`v*` tag, optionally UPX-compresses each binary, and uploads both raw
+and `.upx` variants to the GitHub release.

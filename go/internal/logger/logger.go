@@ -1,6 +1,5 @@
 // Package logger writes timestamped log lines to a file and rotates the
-// file in place when it grows past a soft line limit. Mirrors the
-// behavior of rotate_log() in podkop_updater.sh.
+// file in place when it grows past a soft line limit.
 package logger
 
 import (

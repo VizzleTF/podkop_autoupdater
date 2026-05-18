@@ -43,9 +43,11 @@ pkill -9 -f "podkop_updater(\\.sh)? --daemon" 2>/dev/null || true
 sleep 1
 rm -rf /tmp/podkop_updater.lock /tmp/podkop_updater.pid 2>/dev/null || true
 
-# --- 4. Remove legacy bash version ---
+# --- 4. Migrate from pre-Go bash version, if present ---
+# Until the bash version has fully aged out we still want to clean up
+# its file when an existing user re-runs the installer.
 if [ -f "$LEGACY_BASH" ]; then
-    step "Removing legacy bash script $LEGACY_BASH"
+    step "Removing previous bash version at $LEGACY_BASH"
     rm -f "$LEGACY_BASH"
 fi
 
