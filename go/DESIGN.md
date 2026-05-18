@@ -209,9 +209,11 @@ go/
 ├── scripts/
 │   ├── init.d/podkop_updater       # procd stub
 │   └── install.sh                  # arch-detect + GitHub release download
-└── .github/
-    └── workflows/
-        └── release.yml             # cross-compile matrix on tag push
+scripts/init.d/         procd service stub
+scripts/install.sh      installer
+
+The CI workflow lives at the repo root (not in this subtree) so GitHub
+can discover it: ../.github/workflows/release.yml.
 ```
 
 ## CI / release
