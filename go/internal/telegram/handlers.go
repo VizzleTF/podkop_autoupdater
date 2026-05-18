@@ -38,12 +38,35 @@ func (t *Bot) fromAllowedChat(cb *models.CallbackQuery) bool {
 	return cb.Message.Message.Chat.ID == t.chatID
 }
 
+// adoptClickedMessage makes the message the user just clicked on the
+// bot's tracked menu. If a previous (orphan) menu was being tracked,
+// it is deleted so the chat doesn't accumulate duplicate menus.
+func (t *Bot) adoptClickedMessage(ctx context.Context, cb *models.CallbackQuery) {
+	if cb == nil || cb.Message.Message == nil {
+		return
+	}
+	clickedID := cb.Message.Message.ID
+	t.mu.Lock()
+	oldID := t.menuMID
+	if oldID == clickedID {
+		t.mu.Unlock()
+		return
+	}
+	t.menuMID = clickedID
+	t.mu.Unlock()
+	logger.Logf("Adopting clicked message id=%d (was tracking %d)", clickedID, oldID)
+	if oldID != 0 {
+		_ = t.deleteMessage(ctx, oldID)
+	}
+}
+
 // onCheckPodkop: проверка версии podkop.
 func (t *Bot) onCheckPodkop(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	if !t.fromAllowedChat(update.CallbackQuery) {
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_check_podkop")
 
 	t.editBusy(ctx, "Проверка podkop...")
@@ -75,6 +98,7 @@ func (t *Bot) onCheckSelf(ctx context.Context, _ *bot.Bot, update *models.Update
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_check_self")
 
 	t.editBusy(ctx, "Проверка updater...")
@@ -106,6 +130,7 @@ func (t *Bot) onRestart(ctx context.Context, _ *bot.Bot, update *models.Update) 
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_restart")
 
 	t.editBusy(ctx, "Перезагрузка podkop...")
@@ -129,6 +154,7 @@ func (t *Bot) onUpdatePodkop(ctx context.Context, _ *bot.Bot, update *models.Upd
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_update_podkop")
 
 	t.mu.Lock()
@@ -161,6 +187,7 @@ func (t *Bot) onUpdateSelf(ctx context.Context, _ *bot.Bot, update *models.Updat
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_update_self")
 
 	t.editBusy(ctx, "Обновление updater...")
@@ -184,6 +211,7 @@ func (t *Bot) onOK(ctx context.Context, _ *bot.Bot, update *models.Update) {
 		return
 	}
 	t.answer(ctx, update.CallbackQuery)
+	t.adoptClickedMessage(ctx, update.CallbackQuery)
 	logger.Logf("Callback: cmd_ok")
 	if err := t.sendDefaultMenu(ctx); err != nil {
 		logger.Errf("send default menu: %v", err)

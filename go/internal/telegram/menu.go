@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"strings"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -136,6 +137,10 @@ func (t *Bot) defaultText() string {
 
 // sendOrEdit edits the existing message (when msgID != 0) or sends a fresh
 // one. Returns the message_id of the resulting message.
+//
+// When Telegram returns "message is not modified" the edit succeeded
+// semantically (the message already has the desired content), so we keep
+// the same msgID without falling back to a new send.
 func (t *Bot) sendOrEdit(ctx context.Context, msgID int, text string, kb *models.InlineKeyboardMarkup) (int, error) {
 	if msgID != 0 {
 		edited, err := t.b.EditMessageText(ctx, &bot.EditMessageTextParams{
@@ -147,6 +152,9 @@ func (t *Bot) sendOrEdit(ctx context.Context, msgID int, text string, kb *models
 		})
 		if err == nil && edited != nil {
 			return edited.ID, nil
+		}
+		if isNotModified(err) {
+			return msgID, nil
 		}
 		logger.Errf("editMessageText id=%d failed: %v (falling back to send)", msgID, err)
 	}
@@ -160,6 +168,12 @@ func (t *Bot) sendOrEdit(ctx context.Context, msgID int, text string, kb *models
 		return 0, err
 	}
 	return sent.ID, nil
+}
+
+// isNotModified reports whether the error is Telegram's "message is not
+// modified" response. We treat that as a no-op success.
+func isNotModified(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "message is not modified")
 }
 
 func (t *Bot) deleteMessage(ctx context.Context, msgID int) error {
