@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: amd64
+            goarch: amd64
+            extra_env: ""
+          - target: arm64
+            goarch: arm64
+            extra_env: ""
+          - target: armv7
+            goarch: arm
+            extra_env: "GOARM=7"
+          - target: mipsle
+            goarch: mipsle
+            extra_env: "GOMIPS=softfloat"
+          - target: mips
+            goarch: mips
+            extra_env: "GOMIPS=softfloat"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go/go.sum
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Build
+        working-directory: go
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          eval "${{ matrix.extra_env }}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${GITHUB_REF_NAME:-dev}" \
+            -o dist/podkop_updater-${{ matrix.target }} \
+            ./cmd/podkop_updater
+
+      - name: UPX compress
+        working-directory: go
+        run: |
+          cp dist/podkop_updater-${{ matrix.target }} dist/podkop_updater-${{ matrix.target }}.upx
+          upx --best --lzma dist/podkop_updater-${{ matrix.target }}.upx || \
+            echo "upx failed, shipping uncompressed only"
+          ls -lh dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: podkop_updater-${{ matrix.target }}
+          path: |
+            go/dist/podkop_updater-${{ matrix.target }}
+            go/dist/podkop_updater-${{ matrix.target }}.upx
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
