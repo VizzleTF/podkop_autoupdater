@@ -1,45 +1,54 @@
-# podkop_updater (Go)
+# podkop_updater (Go source)
 
-Go rewrite of `../podkop_updater.sh`. Status: **phase 0 scaffolding**, no functional implementation yet.
-
-See [DESIGN.md](DESIGN.md) for architecture and implementation plan.
+The runnable Go daemon for podkop_updater. End-user docs and the install
+command live in the [repository root README](../README.md); this directory
+is for developers.
 
 ## Build
 
 ```sh
-make build          # current host
-make build-all      # all OpenWrt-relevant archs
-make upx            # compress with UPX (requires upx installed)
+make build           # current host
+make build-all       # cross-compile for amd64, arm64, armv7, mipsle, mips
+make upx             # UPX-compress (requires upx installed)
+make test
 ```
 
 Binaries land in `dist/`.
-
-## Run (after implementation)
-
-```sh
-podkop_updater --daemon       # main mode (procd init.d)
-podkop_updater check          # one-shot version check
-podkop_updater force-update   # update without TG confirm
-podkop_updater self-update    # update the updater binary
-```
 
 ## Layout
 
 ```
 cmd/podkop_updater/   binary entrypoint, CLI dispatch
-internal/             unexported packages (config, transport, telegram, updater, service, selfupdate, logger)
-scripts/init.d/       procd service stub
-.github/workflows/    cross-compile CI matrix
-DESIGN.md             architecture, packages, phases
+internal/
+  config/             UCI loader (bot_token, chat_id, check_interval,
+                      emergency_ips)
+  logger/             timestamped file log with in-place rotation
+  telegram/           bot wrapper around github.com/go-telegram/bot
+  transport/          three-tier RoundTripper + DoH discovery
+  service/            podkop restart, DNS health check, runner
+  selfupdate/         atomic binary swap with .bak rollback
+  updater/            GitHub release fetch, semver compare, install.sh runner
+scripts/init.d/       procd service stub (template; embedded by ../install.sh)
+DESIGN.md             architecture notes and design rationale
 ```
 
-## Why a Go rewrite
+The installer script lives at `../install.sh` (repository root).
+The CI release workflow lives at `../.github/workflows/release.yml` —
+GitHub only discovers workflows in `.github/workflows/` at the repo root.
 
-See `../podkop_updater.sh` audit findings (problems P1–P6) — primary motivation is:
-- Replace fragile `jq` shell-out pipelines with typed JSON
-- Untangle transport tier-fallback logic into a single `http.RoundTripper`
-- Atomic self-update with rollback support
-- Enable real unit testing
-- Single static binary, no `curl`/`jq`/`wget`/`nslookup` runtime dependencies
+## Release
 
-Cost: ~1.7 MB UPX-compressed binary on mipsle (vs 30 KB bash script). Acceptable on modern routers, tight on legacy 16 MB flash devices.
+Push an annotated tag matching `v*` from `main`:
+
+```sh
+git tag -a v0.1.3 -m "release notes"
+git push origin v0.1.3
+```
+
+The workflow builds the five-arch matrix, optionally compresses with UPX,
+and publishes the assets to a GitHub release.
+
+For local end-to-end testing of the podkop-update path without downgrading
+the real package, set `PODKOP_FAKE_INSTALLED` in the daemon's environment.
+The value is passed through `Normalize` before comparing to the latest
+GitHub release.

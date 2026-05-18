@@ -1,73 +1,83 @@
 [Русская версия](./README_ru.md)
 
-# Podkop Updater for OpenWrt
+# podkop_updater
 
-Automatic update checker for [podkop](https://github.com/itdoginfo/podkop) on OpenWrt/ImmortalWrt routers with Telegram bot control.
+Telegram bot for OpenWrt/ImmortalWrt routers that watches
+[podkop](https://github.com/itdoginfo/podkop) for new releases and lets you
+trigger updates and restarts from chat. Implemented as a single static Go
+binary managed by procd.
 
 ## Features
-- Persistent Telegram bot with inline menu (daemon mode, default)
-- Two buttons: "Check version" and "Restart podkop", always available
-- Menu switches to "Update" / "Cancel" when a new version is detected
-- Automatic periodic version check (configurable interval)
-- 3-tier transport fallback: Podkop SOCKS5 proxy → Direct → Emergency Telegram IPs
-- Post-update/restart DNS health check
-- procd init.d service with auto-restart on crash
-- Legacy modes: cron with Telegram confirmation, cron with auto-update, manual
+- Persistent Telegram menu with three buttons: check podkop version, check
+  updater version, restart podkop
+- Inline-edit flow: every action edits the same message through busy →
+  result transitions
+- Periodic version check (default every 6h); when a new podkop release
+  appears the bot delivers a fresh notification message
+- Tiered HTTP transport: Podkop SOCKS5 → direct → emergency Telegram IPs,
+  with sticky last-known-good tier
+- Emergency IPs refreshed daily via DoH using podkop's configured DNS
+  server; persisted in UCI so they survive reboots
+- Atomic self-update with `.bak` rollback file; procd respawns into the
+  new binary
+- DNS health check after every restart/update polls
+  `fakeip.podkop.fyi` until it resolves into podkop's fakeip range
 
 ## Requirements
-- OpenWrt or ImmortalWrt router
-- Packages: `curl`, `jq`, `wget`, `nslookup` (installed automatically)
-- Telegram bot: token from [@BotFather](https://t.me/BotFather), chat ID from [@getmyid_bot](https://t.me/getmyid_bot)
+- OpenWrt or ImmortalWrt router (supported archs: amd64, arm64, armv7,
+  mipsle softfloat, mips softfloat)
+- Telegram bot token (from [@BotFather](https://t.me/BotFather)) and chat
+  ID (from [@get_id_bot](https://t.me/get_id_bot))
 
 ## Installation
+
 ```sh
-sh <(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)
+sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
 ```
 
-The installer will guide you through mode selection and configuration.
+The installer detects the architecture, stops any previous version, downloads
+the matching binary from the latest GitHub release, configures the procd
+service, and prompts for the bot token + chat ID if they aren't already in
+UCI.
 
-### Update modes
-| Mode | Description |
-|------|-------------|
-| 1 | Manual — run via console, no automation |
-| 2 | Automatic — cron, no Telegram |
-| 3 | Cron + Telegram confirmation |
-| **4 (default)** | **Daemon with persistent Telegram menu** |
+If the upstream podkop package ships its own `/usr/bin/podkop_bot`, stop and
+disable it first — both daemons polling the same bot token will steal
+updates from each other.
 
-## Usage
+## Configuration
 
-| Command | Description |
-|---------|-------------|
-| `podkop_updater.sh --daemon` | Run as persistent Telegram bot (used by init.d) |
-| `podkop_updater.sh` | One-shot update check (Telegram confirmation) |
-| `podkop_updater.sh --force` | Auto-update without confirmation |
-| `podkop_updater.sh --dry-run` | Test full flow without making changes |
+Settings live in UCI (`/etc/config/podkop_updater`):
 
-### Service management (daemon mode)
+```sh
+uci set podkop_updater.settings.bot_token="YOUR_TOKEN"
+uci set podkop_updater.settings.chat_id="YOUR_CHAT_ID"
+uci set podkop_updater.settings.check_interval=6   # hours
+uci commit podkop_updater
+```
+
+The daemon also writes the discovered emergency IP list back to
+`podkop_updater.settings.emergency_ips` (space-separated).
+
+## Service
+
 ```sh
 /etc/init.d/podkop_updater start
 /etc/init.d/podkop_updater stop
 /etc/init.d/podkop_updater restart
 ```
 
-## Configuration
+Logs: `/tmp/podkop_update.log` (rotates in place at ~200 lines).
 
-Credentials are stored in UCI (`/etc/config/podkop_updater`):
+## Build from source
+
 ```sh
-uci set podkop_updater.settings.bot_token="YOUR_TOKEN"
-uci set podkop_updater.settings.chat_id="YOUR_CHAT_ID"
-uci set podkop_updater.settings.check_interval=6  # hours, daemon mode only
-uci commit podkop_updater
+cd go
+make build           # current host
+make build-all       # cross-compile for the five OpenWrt-relevant archs
+make upx             # UPX-compress (requires upx installed)
 ```
 
-## Troubleshooting
-
-Check logs: `cat /tmp/podkop_update.log`
-
-Common issues:
-- **No Telegram message**: Verify bot token and chat ID, check network access to `api.telegram.org`
-- **DNS check fails**: Normal if podkop service isn't running yet
-- **Daemon not starting**: Check `/etc/init.d/podkop_updater status`, review logs
+See [`go/DESIGN.md`](./go/DESIGN.md) for the architectural notes.
 
 ## License
 [MIT](https://opensource.org/licenses/MIT)

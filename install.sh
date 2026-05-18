@@ -1,361 +1,131 @@
-#!/bin/ash
+#!/bin/sh
+# Installer for podkop_updater (Go daemon) on OpenWrt / ImmortalWrt.
+#
+#   sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
+#
+# Detects arch, downloads latest release binary, sets up procd init.d service,
+# and migrates an existing bash-based podkop_updater installation.
+set -e
 
-# Installer script for podkop_updater.sh
-# Downloads, configures, and optionally schedules podkop_updater.sh on OpenWrt
+REPO="VizzleTF/podkop_autoupdater"
+BIN_DEST="/usr/bin/podkop_updater"
+INITD_DEST="/etc/init.d/podkop_updater"
+UCI_PKG="podkop_updater"
+UCI_SEC="settings"
+LEGACY_BASH="/usr/bin/podkop_updater.sh"
 
-# Constants
-UPDATER_URL="https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/podkop_updater.sh"  # URL to download the updater script
-UPDATER_PATH="/usr/bin/podkop_updater.sh"  # Installation path for the updater script
-INITD_PATH="/etc/init.d/podkop_updater"  # Init.d service script path
-DEFAULT_CHECK_INTERVAL=6  # Default auto-check interval in hours for daemon mode
-LOG_FILE="/tmp/podkop_update.log"  # Log file for update operations
-UCI_PKG="podkop_updater"           # UCI package name for credentials storage
-UCI_SEC="settings"                 # UCI section name
-DEFAULT_CRON_HOURS=1  # Default cron interval in hours. Must be bigger than POLL_TIMEOUT to avoid overlapping runs
-TOKEN_DISPLAY_LENGTH=10  # Number of characters to show when displaying bot token
-CRON_FILE="/etc/crontabs/root"  # Path to root crontab file
-OS_RELEASE_FILE="/etc/os-release"  # System OS release information file
-GITHUB_API_URL="https://api.github.com/repos/itdoginfo/podkop/releases/latest"  # GitHub API URL for latest podkop release
-TELEGRAM_API_BASE="https://api.telegram.org/bot"  # Base URL for Telegram Bot API
-CRON_SERVICE="/etc/init.d/cron"  # Cron service control script
+step() { echo "==> $*"; }
+fail() { echo "Error: $*" >&2; exit 1; }
 
-# Functions
-exit_with_error() {
-  local message="$1"
-  echo "Error: $message"
-  exit 1
-}
+# --- 1. OS check ---
+grep -qE '(OpenWrt|immortalwrt)' /etc/os-release || \
+    fail "Not OpenWrt/ImmortalWrt"
+step "OpenWrt detected: $(grep '^PRETTY_NAME' /etc/os-release | cut -d= -f2-)"
 
-download_file() {
-  local url="$1"
-  local output_path="$2"
-  if curl -sfL -o "$output_path" "$url" 2>/dev/null; then
-    return 0
-  elif wget -O "$output_path" "$url" > /dev/null 2>&1; then
-    return 0
-  fi
-  exit_with_error "Failed to download from $url. Please check your internet connection."
-}
+# --- 2. Arch detection ---
+case "$(uname -m)" in
+    x86_64)    ARCH=amd64  ;;
+    aarch64)   ARCH=arm64  ;;
+    armv7l)    ARCH=armv7  ;;
+    mips)      ARCH=mips   ;;
+    mipsel)    ARCH=mipsle ;;
+    *) fail "Unsupported arch: $(uname -m)" ;;
+esac
+step "Architecture: $ARCH"
 
-setup_cron_job() {
-  local cron_hours="$1"
-  local updater_command="$2"
-  echo "Setting up cron job to run every $cron_hours hour(s)..."
-  if [ ! -f "$CRON_FILE" ]; then
-    touch "$CRON_FILE"
-  fi
-  sed -i "/podkop_updater.sh/d" "$CRON_FILE"
-  echo "0 */$cron_hours * * * $updater_command" >> "$CRON_FILE"
-  $CRON_SERVICE restart > /dev/null 2>&1
-}
+# --- 3. Stop existing daemon (bash or Go) ---
+if [ -f "$INITD_DEST" ]; then
+    step "Stopping existing service"
+    "$INITD_DEST" stop 2>/dev/null || true
+    "$INITD_DEST" disable 2>/dev/null || true
+fi
+pkill -9 -f "podkop_updater(\\.sh)? --daemon" 2>/dev/null || true
+sleep 1
+rm -rf /tmp/podkop_updater.lock /tmp/podkop_updater.pid 2>/dev/null || true
 
-remove_cron_job() {
-  if [ -f "$CRON_FILE" ]; then
-    sed -i "/podkop_updater.sh/d" "$CRON_FILE"
-    $CRON_SERVICE restart > /dev/null 2>&1
-  fi
-}
+# --- 4. Remove legacy bash version ---
+if [ -f "$LEGACY_BASH" ]; then
+    step "Removing legacy bash script $LEGACY_BASH"
+    rm -f "$LEGACY_BASH"
+fi
 
-setup_initd_service() {
-  cat > "$INITD_PATH" <<'INITD_EOF'
+# --- 5. Download binary ---
+URL="https://github.com/${REPO}/releases/latest/download/podkop_updater-${ARCH}"
+step "Downloading $URL"
+TMP="${BIN_DEST}.new"
+if curl -fL "$URL" -o "$TMP"; then
+    :
+elif command -v wget >/dev/null 2>&1 && wget -O "$TMP" "$URL"; then
+    :
+else
+    fail "Download failed. Check that release asset exists."
+fi
+[ -s "$TMP" ] || fail "Downloaded binary is empty."
+chmod +x "$TMP"
+mv "$TMP" "$BIN_DEST"
+SIZE=$(ls -l "$BIN_DEST" | awk '{print $5}')
+step "Installed $BIN_DEST ($SIZE bytes)"
+
+# --- 6. Configure UCI ---
+EXISTING_TOKEN=$(uci -q get "${UCI_PKG}.${UCI_SEC}.bot_token" 2>/dev/null || true)
+EXISTING_CHAT=$(uci -q get "${UCI_PKG}.${UCI_SEC}.chat_id" 2>/dev/null || true)
+if [ -n "$EXISTING_TOKEN" ] && [ -n "$EXISTING_CHAT" ]; then
+    # Bot ID (digits before colon) is public; the secret after the colon
+    # must never be printed.
+    BOT_ID="${EXISTING_TOKEN%%:*}"
+    step "UCI already configured (bot_id=${BOT_ID}, chat_id=$EXISTING_CHAT)"
+else
+    echo "Telegram bot token (from @BotFather):"
+    read -r TOKEN
+    [ -z "$TOKEN" ] && fail "Empty token"
+    echo "Telegram chat ID (from @get_id_bot):"
+    read -r CHAT
+    [ -z "$CHAT" ] && fail "Empty chat id"
+    echo "Auto-check interval in hours (default 6):"
+    read -r INTERVAL
+    [ -z "$INTERVAL" ] && INTERVAL=6
+
+    [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
+    uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null || true
+    uci set "${UCI_PKG}.${UCI_SEC}=${UCI_SEC}"
+    uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${TOKEN}"
+    uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT}"
+    uci set "${UCI_PKG}.${UCI_SEC}.check_interval=${INTERVAL}"
+    uci commit "${UCI_PKG}"
+    step "UCI saved to /etc/config/${UCI_PKG}"
+fi
+
+# --- 7. Init.d service ---
+step "Installing procd init.d service"
+cat > "$INITD_DEST" <<'INITD_EOF'
 #!/bin/sh /etc/rc.common
+# procd init.d service for podkop_updater (Go daemon).
 
 START=99
 STOP=10
 USE_PROCD=1
 
+PROG=/usr/bin/podkop_updater
+
 start_service() {
     procd_open_instance
-    procd_set_param command /usr/bin/podkop_updater.sh --daemon
+    procd_set_param command "$PROG" --daemon
     procd_set_param respawn 3600 5 5
     procd_set_param stdout 0
     procd_set_param stderr 0
     procd_close_instance
 }
 INITD_EOF
-  chmod +x "$INITD_PATH"
-}
+chmod +x "$INITD_DEST"
+"$INITD_DEST" enable
+"$INITD_DEST" start
 
-stop_daemon() {
-  if [ -f "$INITD_PATH" ]; then
-    "$INITD_PATH" stop > /dev/null 2>&1
-    "$INITD_PATH" disable > /dev/null 2>&1
-  fi
-  # Kill any running daemon instances
-  local pid
-  if [ -f "/tmp/podkop_updater.lock/pid" ]; then
-    pid=$(cat "/tmp/podkop_updater.lock/pid" 2>/dev/null)
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  fi
-}
-
-validate_cron_hours() {
-  local hours="$1"
-  if ! echo "$hours" | grep -q '^[0-9]\+$' || [ "$hours" -lt 1 ]; then
-    echo "Error: Invalid input. Using default of $DEFAULT_CRON_HOURS hour."
-    echo $DEFAULT_CRON_HOURS
-  else
-    echo "$hours"
-  fi
-}
-
-# Step 1: Check if running on OpenWrt
-if ! grep -q -e "OpenWrt" -e "immortalwrt" $OS_RELEASE_FILE; then
-  exit_with_error "This script is designed for OpenWrt or ImmortalWrt. Exiting."
-fi
-
-# Detect package manager: OpenWrt 25.x+ uses apk, older versions use opkg
-PKG_MANAGER=""
-if command -v apk >/dev/null 2>&1; then
-  PKG_MANAGER="apk"
-elif command -v opkg >/dev/null 2>&1; then
-  PKG_MANAGER="opkg"
+# --- 8. Status check ---
+sleep 2
+if pgrep -f "$BIN_DEST --daemon" >/dev/null; then
+    step "Service running. Logs: /tmp/podkop_update.log"
+    echo
+    echo "Done. Open the Telegram chat with your bot and send /menu."
 else
-  _ver=$(grep "^VERSION_ID=" "$OS_RELEASE_FILE" 2>/dev/null | cut -d'"' -f2)
-  _major=$(echo "$_ver" | cut -d'.' -f1)
-  if echo "$_major" | grep -qE '^[0-9]+$' && [ "$_major" -ge 25 ] 2>/dev/null; then
-    PKG_MANAGER="apk"
-  else
-    PKG_MANAGER="opkg"
-  fi
-  unset _ver _major
+    fail "Service failed to start. Check /tmp/podkop_update.log"
 fi
-
-OWRT_VERSION=$(grep '^VERSION_ID=' "$OS_RELEASE_FILE" 2>/dev/null | cut -d'"' -f2)
-echo "OpenWrt version : ${OWRT_VERSION:-unknown}"
-echo "Package manager : ${PKG_MANAGER}"
-
-pkg_update() {
-  case "$PKG_MANAGER" in
-    apk)  apk update >/dev/null 2>&1 ;;
-    opkg) opkg update >/dev/null 2>&1 ;;
-  esac
-}
-
-pkg_is_installed() {
-  case "$PKG_MANAGER" in
-    apk)  apk info "$1" >/dev/null 2>&1 ;;
-    opkg) opkg list-installed 2>/dev/null | grep -q "^${1} " ;;
-  esac
-}
-
-pkg_install() {
-  case "$PKG_MANAGER" in
-    apk)  apk add "$1" >/dev/null 2>&1 ;;
-    opkg) opkg install "$1" >/dev/null 2>&1 ;;
-  esac
-}
-
-# Step 2: Install dependencies
-echo "Installing required packages (curl, jq, wget)..."
-pkg_update
-for pkg in curl jq wget; do
-  if pkg_is_installed "$pkg"; then
-    echo "  $pkg — already installed"
-  else
-    printf "  Installing %s... " "$pkg"
-    if pkg_install "$pkg"; then
-      echo "OK"
-    else
-      echo "FAILED"
-      exit_with_error "Failed to install $pkg. Please check your internet connection and package repositories."
-    fi
-  fi
-done
-echo "Dependencies installed."
-
-# Step 3: Check if podkop_updater.sh already exists and is configured
-EXISTING_BOT_TOKEN=$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token 2>/dev/null)
-EXISTING_CHAT_ID=$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id 2>/dev/null)
-
-if [ -f "$UPDATER_PATH" ] && [ -n "$EXISTING_BOT_TOKEN" ] && [ -n "$EXISTING_CHAT_ID" ]; then
-  echo "Found existing podkop_updater.sh at $UPDATER_PATH"
-  echo "Script is already configured with:"
-  echo "  Bot Token: ${EXISTING_BOT_TOKEN:0:$TOKEN_DISPLAY_LENGTH}..."
-  echo "  Chat ID: $EXISTING_CHAT_ID"
-  echo ""
-  echo "Choose an option:"
-  echo "1) Keep existing configuration and exit"
-  echo "2) Reconfigure with new settings"
-  echo "3) Update script but keep existing configuration"
-  echo "Enter 1, 2, or 3 (default: 1):"
-  read -r EXISTING_CONFIG_CHOICE
-
-  case "$EXISTING_CONFIG_CHOICE" in
-    2)
-      echo "Reconfiguring with new settings..."
-      ;;
-    3)
-      echo "Updating script while preserving UCI configuration..."
-      download_file $UPDATER_URL $UPDATER_PATH
-      chmod +x $UPDATER_PATH
-      echo "Script updated. UCI configuration (/etc/config/${UCI_PKG}) preserved."
-      # Restart daemon if init.d service exists and is enabled
-      if [ -f "$INITD_PATH" ]; then
-        echo "Restarting daemon service..."
-        "$INITD_PATH" stop > /dev/null 2>&1
-        sleep 1
-        # Ensure init.d service is set up (in case it was from an older version)
-        setup_initd_service
-        "$INITD_PATH" enable
-        "$INITD_PATH" start
-        echo "Daemon restarted."
-      fi
-      echo "Installation complete!"
-      exit 0
-      ;;
-    1|*)
-      echo "Keeping existing configuration. Installation complete!"
-      exit 0
-      ;;
-  esac
-fi
-
-# Download podkop_updater.sh
-echo "Downloading podkop_updater.sh from $UPDATER_URL..."
-download_file $UPDATER_URL $UPDATER_PATH
-chmod +x $UPDATER_PATH
-echo "Downloaded and set executable: $UPDATER_PATH"
-
-# Step 4: Prompt for update mode
-echo "Choose update mode:"
-echo "1) Manual (run via console, no cron)"
-echo "2) Automatic (run via cron, no Telegram confirmation)"
-echo "3) Automatic with Telegram bot confirmation (run via cron)"
-echo "4) Telegram bot with persistent menu (default, daemon mode)"
-echo "Enter 1, 2, 3, or 4 (default: 4):"
-read -r UPDATE_MODE
-case "$UPDATE_MODE" in
-  1)
-    echo "Manual mode selected. Script installed without cron or Telegram configuration."
-    stop_daemon
-    remove_cron_job
-    ;;
-  2)
-    echo "Automatic mode selected."
-    stop_daemon
-    # Prompt for cron frequency
-    echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
-    read -r CRON_HOURS
-    CRON_HOURS=$(validate_cron_hours "$CRON_HOURS")
-    # Configure cron job
-    setup_cron_job "$CRON_HOURS" "$UPDATER_PATH --force"
-    echo "Cron job configured for automatic updates."
-    ;;
-  3)
-    echo "Automatic with Telegram bot confirmation selected."
-    stop_daemon
-    # Prompt for Telegram bot token
-    echo "Please enter your Telegram bot token (obtained from @BotFather):"
-    read -r BOT_TOKEN
-    if [ -z "$BOT_TOKEN" ]; then
-      exit_with_error "Bot token cannot be empty. Exiting."
-    fi
-    # Prompt for Telegram chat ID
-    echo "Please enter your Telegram chat ID (obtained from @get_id_bot or similar):"
-    read -r CHAT_ID
-    if [ -z "$CHAT_ID" ]; then
-      exit_with_error "Chat ID cannot be empty. Exiting."
-    fi
-    # Save credentials to UCI
-    echo "Saving credentials to UCI (/etc/config/${UCI_PKG})..."
-    [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
-    uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null
-    uci set "${UCI_PKG}.${UCI_SEC}=${UCI_SEC}"
-    uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${BOT_TOKEN}"
-    uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT_ID}"
-    uci commit "${UCI_PKG}"
-    if [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token)" != "$BOT_TOKEN" ] || \
-       [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id)" != "$CHAT_ID" ]; then
-      exit_with_error "Failed to save UCI configuration."
-    fi
-    # Prompt for cron frequency
-    echo "How often should the script run (in hours, e.g., 1 for hourly, 6 for every 6 hours)?"
-    read -r CRON_HOURS
-    CRON_HOURS=$(validate_cron_hours "$CRON_HOURS")
-    # Configure cron job
-    setup_cron_job "$CRON_HOURS" "$UPDATER_PATH"
-    echo "Cron job configured for Telegram-confirmed updates."
-    ;;
-  4|*)
-    echo "Telegram bot with persistent menu (daemon mode) selected."
-    # Prompt for Telegram bot token
-    echo "Please enter your Telegram bot token (obtained from @BotFather):"
-    read -r BOT_TOKEN
-    if [ -z "$BOT_TOKEN" ]; then
-      exit_with_error "Bot token cannot be empty. Exiting."
-    fi
-    # Prompt for Telegram chat ID
-    echo "Please enter your Telegram chat ID (obtained from @get_id_bot or similar):"
-    read -r CHAT_ID
-    if [ -z "$CHAT_ID" ]; then
-      exit_with_error "Chat ID cannot be empty. Exiting."
-    fi
-    # Save credentials to UCI
-    echo "Saving credentials to UCI (/etc/config/${UCI_PKG})..."
-    [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
-    uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null
-    uci set "${UCI_PKG}.${UCI_SEC}=${UCI_SEC}"
-    uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${BOT_TOKEN}"
-    uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT_ID}"
-    # Prompt for auto-check interval
-    echo "How often should the bot auto-check for updates (in hours, e.g., 6 for every 6 hours)?"
-    read -r CHECK_INTERVAL
-    CHECK_INTERVAL=$(validate_cron_hours "${CHECK_INTERVAL:-$DEFAULT_CHECK_INTERVAL}")
-    uci set "${UCI_PKG}.${UCI_SEC}.check_interval=${CHECK_INTERVAL}"
-    uci commit "${UCI_PKG}"
-    if [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.bot_token)" != "$BOT_TOKEN" ] || \
-       [ "$(uci -q get ${UCI_PKG}.${UCI_SEC}.chat_id)" != "$CHAT_ID" ]; then
-      exit_with_error "Failed to save UCI configuration."
-    fi
-    # Remove cron job if present
-    remove_cron_job
-    # Stop any existing daemon
-    stop_daemon
-    # Install and start init.d service
-    echo "Setting up init.d service..."
-    setup_initd_service
-    "$INITD_PATH" enable
-    "$INITD_PATH" start
-    echo "Daemon service installed and started."
-    ;;
-esac
-
-# Step 5: Verify network access
-echo "Verifying network access to GitHub and Telegram APIs..."
-if ! curl -s $GITHUB_API_URL > /dev/null; then
-  echo "Warning: Cannot reach GitHub API. The script may fail to check for updates."
-fi
-if [ "$UPDATE_MODE" = "3" ] || [ "$UPDATE_MODE" = "4" ] || [ -z "$UPDATE_MODE" ]; then
-  if ! curl -s "${TELEGRAM_API_BASE}$BOT_TOKEN/getMe" | grep -q '"ok":true'; then
-    echo "Warning: Cannot reach Telegram API or invalid bot token. The script may fail to send notifications."
-  fi
-fi
-
-# Step 6: Final instructions
-echo "Installation complete!"
-echo "The script is installed at $UPDATER_PATH."
-if [ "$UPDATE_MODE" = "1" ]; then
-  echo "Run manually with: $UPDATER_PATH"
-elif [ "$UPDATE_MODE" = "2" ]; then
-  echo "Automatic updates are scheduled every $CRON_HOURS hour(s)."
-elif [ "$UPDATE_MODE" = "3" ]; then
-  echo "Telegram-confirmed updates are scheduled every $CRON_HOURS hour(s)."
-  echo "Reply 'yes' to Telegram messages to update or 'no' to cancel."
-else
-  echo "Telegram bot daemon is running with persistent menu."
-  echo "Auto-check interval: every $CHECK_INTERVAL hour(s)."
-  echo "Use buttons in Telegram to check for updates or restart podkop."
-  echo ""
-  echo "Service management:"
-  echo "  $INITD_PATH start    - Start daemon"
-  echo "  $INITD_PATH stop     - Stop daemon"
-  echo "  $INITD_PATH restart  - Restart daemon"
-fi
-echo "Logs will be written to $LOG_FILE."
-echo ""
-echo "Available commands:"
-echo "  $UPDATER_PATH              - Run update check (one-shot)"
-echo "  $UPDATER_PATH --dry-run    - Test full flow without making changes"
-echo "  $UPDATER_PATH --force      - Force update without Telegram confirmation"
-echo "  $UPDATER_PATH --daemon     - Run as persistent Telegram bot"
