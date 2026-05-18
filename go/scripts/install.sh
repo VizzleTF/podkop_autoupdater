@@ -70,7 +70,10 @@ step "Installed $BIN_DEST ($SIZE bytes)"
 EXISTING_TOKEN=$(uci -q get "${UCI_PKG}.${UCI_SEC}.bot_token" 2>/dev/null || true)
 EXISTING_CHAT=$(uci -q get "${UCI_PKG}.${UCI_SEC}.chat_id" 2>/dev/null || true)
 if [ -n "$EXISTING_TOKEN" ] && [ -n "$EXISTING_CHAT" ]; then
-    step "UCI already configured (bot_token=***${EXISTING_TOKEN##*:*-}, chat_id=$EXISTING_CHAT)"
+    # Bot ID (digits before colon) is public; the secret after the colon
+    # must never be printed.
+    BOT_ID="${EXISTING_TOKEN%%:*}"
+    step "UCI already configured (bot_id=${BOT_ID}, chat_id=$EXISTING_CHAT)"
 else
     echo "Telegram bot token (from @BotFather):"
     read -r TOKEN
