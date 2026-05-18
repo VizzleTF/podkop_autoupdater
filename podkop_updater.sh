@@ -245,6 +245,18 @@ tg_answer_callback() {
     -d "callback_query_id=$1" >/dev/null 2>&1
 }
 
+tg_delete_message() {
+  local msg_id="$1"
+  [ -z "$msg_id" ] || [ "$msg_id" = "null" ] && return 0
+  if tg_api "deleteMessage" "$CURL_TIMEOUT" "5" -X POST \
+      -d "chat_id=$CHAT_ID" -d "message_id=$msg_id" >/dev/null 2>&1; then
+    log "Deleted message $msg_id"
+    return 0
+  fi
+  log "Warning: deleteMessage failed for $msg_id"
+  return 1
+}
+
 # =============================================================================
 # Daemon Mode Functions
 # =============================================================================
@@ -588,6 +600,8 @@ daemon_loop() {
       log "Running periodic version check"
       old_pending="$PENDING_LATEST_VERSION"
       if do_version_check && [ "$UPDATE_AVAILABLE" -eq 1 ] && [ "$PENDING_LATEST_VERSION" != "$old_pending" ]; then
+        tg_delete_message "$MENU_MSG_ID"
+        MENU_MSG_ID=""
         send_update_menu
       fi
       last_auto_check=$now
