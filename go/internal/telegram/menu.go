@@ -16,6 +16,7 @@ var (
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{{Text: "🔍 Проверить podkop", CallbackData: "cmd_check_podkop"}},
 			{{Text: "⬆️ Проверить updater", CallbackData: "cmd_check_self"}},
+			{{Text: "🌐 Проверить DNS", CallbackData: "cmd_check_dns"}},
 			{{Text: "🔄 Перезагрузить podkop", CallbackData: "cmd_restart"}},
 		},
 	}
@@ -41,93 +42,61 @@ var (
 
 // sendDefaultMenu renders the steady-state 3-button menu.
 func (t *Bot) sendDefaultMenu(ctx context.Context) error {
-	t.mu.Lock()
-	text := t.defaultText()
-	mid := t.menuMID
-	t.mu.Unlock()
-
-	newMID, err := t.sendOrEdit(ctx, mid, text, kbDefault)
-	if err != nil {
-		return err
-	}
-	t.mu.Lock()
-	t.menuMID = newMID
-	t.mu.Unlock()
-	return nil
+	return t.replaceMenu(ctx, t.defaultText(t.state.installed()), kbDefault)
 }
 
 // sendUpdatePodkopMenu shows the "podkop update available" prompt as a fresh
 // message (caller is expected to have already deleted the previous one when
 // triggered by the periodic check).
 func (t *Bot) sendUpdatePodkopMenu(ctx context.Context) error {
-	t.mu.Lock()
-	text := "Доступна новая версия podkop: <b>" + t.latestVer + "</b>\nТекущая: " + t.installedVer
-	mid := t.menuMID
-	t.mu.Unlock()
+	installed, latest := t.state.installedAndLatest()
+	text := "Доступна новая версия podkop: <b>" + latest + "</b>\nТекущая: " + installed
+	return t.replaceMenu(ctx, text, kbUpdatePodkop)
+}
 
-	newMID, err := t.sendOrEdit(ctx, mid, text, kbUpdatePodkop)
+// replaceMenu edits the tracked menu (or sends fresh if none) and updates
+// menuMID. Used by send* paths that propagate errors to the caller.
+func (t *Bot) replaceMenu(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) error {
+	newMID, err := t.sendOrEdit(ctx, t.state.menuID(), text, kb)
 	if err != nil {
 		return err
 	}
-	t.mu.Lock()
-	t.menuMID = newMID
-	t.mu.Unlock()
+	t.state.setMenuID(newMID)
 	return nil
+}
+
+// updateMenu is the fire-and-log variant used by callback handlers: edit
+// failures are logged but not returned, since the handler has nothing
+// useful to do with them.
+func (t *Bot) updateMenu(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) {
+	if err := t.replaceMenu(ctx, text, kb); err != nil {
+		logger.Errf("updateMenu: %v", err)
+	}
 }
 
 // editBusy puts the menu into a "Проверка..." / "Перезагрузка..." in-progress
 // state with no buttons.
 func (t *Bot) editBusy(ctx context.Context, text string) {
-	t.mu.Lock()
-	mid := t.menuMID
-	t.mu.Unlock()
-	newMID, err := t.sendOrEdit(ctx, mid, text, kbEmpty)
-	if err != nil {
-		logger.Errf("editBusy: %v", err)
-		return
-	}
-	t.mu.Lock()
-	t.menuMID = newMID
-	t.mu.Unlock()
+	t.updateMenu(ctx, text, kbEmpty)
 }
 
 // editResult finishes an action with text and a single ОК button.
 func (t *Bot) editResult(ctx context.Context, text string) {
-	t.mu.Lock()
-	mid := t.menuMID
-	t.mu.Unlock()
-	newMID, err := t.sendOrEdit(ctx, mid, text, kbOK)
-	if err != nil {
-		logger.Errf("editResult: %v", err)
-		return
-	}
-	t.mu.Lock()
-	t.menuMID = newMID
-	t.mu.Unlock()
+	t.updateMenu(ctx, text, kbOK)
 }
 
 // editUpdateAvailable shows the "update available" state on the existing menu
 // message with a single Обновить button.
 func (t *Bot) editUpdateAvailable(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) {
-	t.mu.Lock()
-	mid := t.menuMID
-	t.mu.Unlock()
-	newMID, err := t.sendOrEdit(ctx, mid, text, kb)
-	if err != nil {
-		logger.Errf("editUpdateAvailable: %v", err)
-		return
-	}
-	t.mu.Lock()
-	t.menuMID = newMID
-	t.mu.Unlock()
+	t.updateMenu(ctx, text, kb)
 }
 
-// defaultText builds the title shown in the steady-state menu.
-// Caller holds t.mu.
-func (t *Bot) defaultText() string {
+// defaultText builds the title shown in the steady-state menu. The installed
+// podkop version is passed in so the caller controls lock scope.
+func (t *Bot) defaultText(installed string) string {
 	text := "<b>Podkop Updater</b> on <b>" + t.hostname + "</b>"
-	if t.installedVer != "" {
-		text += "\npodkop: " + t.installedVer
+	if installed != "" {
+		text += "\npodkop: " + installed
 	}
 	if t.selfVer != "" {
 		text += "\nupdater: " + t.selfVer

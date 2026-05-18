@@ -9,9 +9,10 @@ import (
 
 var apkVersionRE = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)
 
-// InstalledVersion reads the locally installed podkop version via opkg or
-// apk. Returns FallbackVersion if neither package manager reports it.
-// The returned string is normalized (no "v" prefix, no "-N" suffix).
+// InstalledVersion reads the locally installed podkop version. Tries the
+// podkop CLI first (package-manager-agnostic), then falls back to opkg and
+// apk. Returns FallbackVersion if nothing reports it. The returned string
+// is normalized (no "v" prefix, no "-N" suffix).
 //
 // For end-to-end testing of the update flow without downgrading the real
 // podkop package, set PODKOP_FAKE_INSTALLED to a semver string (e.g.
@@ -21,6 +22,9 @@ func InstalledVersion() string {
 	if fake := os.Getenv("PODKOP_FAKE_INSTALLED"); fake != "" {
 		return Normalize(fake)
 	}
+	if v := readPodkopCLI(); v != "" {
+		return Normalize(v)
+	}
 	if v := readOpkg(); v != "" {
 		return Normalize(v)
 	}
@@ -28,6 +32,14 @@ func InstalledVersion() string {
 		return Normalize(v)
 	}
 	return Normalize(FallbackVersion)
+}
+
+func readPodkopCLI() string {
+	out, err := exec.Command("podkop", "show_version").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func readOpkg() string {
@@ -49,10 +61,4 @@ func readApk() string {
 		return ""
 	}
 	return apkVersionRE.FindString(string(out))
-}
-
-// Update fetches and runs the upstream install.sh. Implementation deferred
-// to phase 3.
-func Update() error {
-	panic("not implemented (phase 3)")
 }

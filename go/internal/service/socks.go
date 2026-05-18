@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/VizzleTF/podkop_autoupdater/go/internal/uci"
 )
 
 const (
@@ -19,11 +20,11 @@ const (
 // system. Returning "" lets the caller skip the SOCKS5 tier entirely
 // instead of waiting on a refused/black-holed connection.
 func DetectSocksAddr() string {
-	activeSec := uciGet("podkop.config.active_section")
+	activeSec, _ := uci.Get("podkop.config.active_section")
 	if activeSec == "" {
 		activeSec = "main"
 	}
-	port := uciGet(fmt.Sprintf("podkop.%s.mixed_proxy_port", activeSec))
+	port, _ := uci.Get(fmt.Sprintf("podkop.%s.mixed_proxy_port", activeSec))
 	if port == "" {
 		port = defaultMixedPort
 	}
@@ -77,16 +78,8 @@ func singBoxMixedListenIP(port string) (string, bool) {
 	return "", false
 }
 
-func uciGet(key string) string {
-	out, err := exec.Command("uci", "-q", "get", key).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
 func lanIP() string {
-	v := uciGet("network.lan.ipaddr")
+	v, _ := uci.Get("network.lan.ipaddr")
 	if v == "" {
 		return ""
 	}

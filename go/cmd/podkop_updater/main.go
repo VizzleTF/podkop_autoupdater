@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -126,7 +127,8 @@ func runDaemon() int {
 		Timeout:   5 * time.Minute,
 		Transport: tt,
 	}
-	runner := service.NewRunner(updateHC, logPath)
+	dnsCfg := service.LoadDNSConfig()
+	runner := service.NewRunner(updateHC, logPath, dnsCfg)
 
 	// DoH discovery uses a plain HTTP client; we don't want to route DNS
 	// fallback queries through the same broken path.
@@ -141,6 +143,7 @@ func runDaemon() int {
 		HTTPClient:    hc,
 		CheckInterval: cfg.CheckInterval,
 		Runner:        runner,
+		DNSConfig:     dnsCfg,
 	})
 	if err != nil {
 		logger.Errf("telegram: %v", err)
@@ -160,11 +163,7 @@ func readHostname() string {
 		return h
 	}
 	if b, err := os.ReadFile("/proc/sys/kernel/hostname"); err == nil {
-		s := string(b)
-		for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
-			s = s[:len(s)-1]
-		}
-		if s != "" {
+		if s := strings.TrimRight(string(b), "\n\r"); s != "" {
 			return s
 		}
 	}
@@ -175,7 +174,7 @@ func readHostname() string {
 // owns it.
 func acquireLock(path string) error {
 	if data, err := os.ReadFile(path); err == nil {
-		if pid, err := strconv.Atoi(string(trimNewlines(data))); err == nil && pid > 0 {
+		if pid, err := strconv.Atoi(strings.TrimRight(string(data), "\n\r ")); err == nil && pid > 0 {
 			if processAlive(pid) {
 				return errors.New("another instance is running (lock: " + path + ")")
 			}
@@ -186,13 +185,6 @@ func acquireLock(path string) error {
 
 func releaseLock(path string) {
 	_ = os.Remove(path)
-}
-
-func trimNewlines(b []byte) []byte {
-	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r' || b[len(b)-1] == ' ') {
-		b = b[:len(b)-1]
-	}
-	return b
 }
 
 func processAlive(pid int) bool {

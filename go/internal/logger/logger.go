@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ func Init(path string, maxLines, keepLines int) error {
 	if keepLines <= 0 || keepLines >= maxLines {
 		keepLines = maxLines / 2
 	}
-	if err := os.MkdirAll(parentDir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("logger: mkdir parent: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -38,15 +39,6 @@ func Init(path string, maxLines, keepLines int) error {
 	f.Close()
 	defaultLogger = &Logger{path: path, maxLines: maxLines, keepLines: keepLines}
 	return nil
-}
-
-func parentDir(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[:i]
-		}
-	}
-	return "."
 }
 
 // Logf writes one unleveled line. Mirrors bash log().
@@ -84,12 +76,8 @@ func (l *Logger) write(line string) {
 }
 
 func (l *Logger) rotateIfNeeded() {
-	count, err := countLines(l.path)
-	if err != nil || count <= l.maxLines {
-		return
-	}
-	tail, err := readLastLines(l.path, l.keepLines)
-	if err != nil {
+	tail, total, err := readTail(l.path, l.keepLines)
+	if err != nil || total <= l.maxLines {
 		return
 	}
 	tmp := l.path + ".tmp"
@@ -99,41 +87,28 @@ func (l *Logger) rotateIfNeeded() {
 	_ = os.Rename(tmp, l.path)
 }
 
-func countLines(path string) (int, error) {
+// readTail scans path once and returns the last `keep` lines joined with
+// newlines (plus a trailing newline) along with the total line count.
+func readTail(path string, keep int) (tail string, total int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	defer f.Close()
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 64*1024), 1024*1024)
-	n := 0
+	ring := make([]string, 0, keep)
 	for s.Scan() {
-		n++
-	}
-	return n, s.Err()
-}
-
-func readLastLines(path string, want int) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 64*1024), 1024*1024)
-	lines := make([]string, 0, want)
-	for s.Scan() {
-		lines = append(lines, s.Text())
-		if len(lines) > want*2 {
-			lines = lines[len(lines)-want:]
+		total++
+		if len(ring) < keep {
+			ring = append(ring, s.Text())
+		} else {
+			copy(ring, ring[1:])
+			ring[keep-1] = s.Text()
 		}
 	}
 	if err := s.Err(); err != nil {
-		return "", err
+		return "", total, err
 	}
-	if len(lines) > want {
-		lines = lines[len(lines)-want:]
-	}
-	return strings.Join(lines, "\n") + "\n", nil
+	return strings.Join(ring, "\n") + "\n", total, nil
 }

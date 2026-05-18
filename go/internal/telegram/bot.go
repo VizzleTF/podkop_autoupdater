@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
+	"github.com/VizzleTF/podkop_autoupdater/go/internal/service"
 )
 
 // UpdateRunner abstracts the update/restart/self-update side effects so the
@@ -24,7 +24,9 @@ type UpdateRunner interface {
 	RunSelfUpdate(ctx context.Context) (statusText string, err error)
 }
 
-// Bot is the daemon-side Telegram client.
+// Bot is the daemon-side Telegram client. The Bot struct itself holds only
+// immutable wiring (chat config, HTTP client, runner, compile-time version,
+// DNS probe config); per-session mutable fields live in botState.
 type Bot struct {
 	chatID        int64
 	checkInterval time.Duration
@@ -32,21 +34,10 @@ type Bot struct {
 	selfVer       string
 	runner        UpdateRunner
 	hc            *http.Client
+	dnsCfg        service.DNSConfig
 
-	b *bot.Bot
-
-	mu sync.Mutex
-	// Single tracked message; UI mutates this one or recreates it on auto-find.
-	menuMID int
-
-	// podkop state
-	installedVer    string
-	latestVer       string
-	updateAvailable bool
-
-	// updater (self) state
-	selfLatest          string
-	selfUpdateAvailable bool
+	b     *bot.Bot
+	state *botState
 }
 
 type Options struct {
@@ -57,6 +48,7 @@ type Options struct {
 	HTTPClient    *http.Client
 	CheckInterval time.Duration
 	Runner        UpdateRunner
+	DNSConfig     service.DNSConfig
 }
 
 // New constructs a Bot and registers callback handlers. Call Start to begin
@@ -81,6 +73,8 @@ func New(opts Options) (*Bot, error) {
 		selfVer:       opts.SelfVersion,
 		runner:        opts.Runner,
 		hc:            opts.HTTPClient,
+		dnsCfg:        opts.DNSConfig,
+		state:         newBotState(),
 	}
 	b, err := bot.New(opts.Token,
 		bot.WithHTTPClient(60*time.Second+15*time.Second, opts.HTTPClient),
@@ -106,18 +100,14 @@ func (t *Bot) Start(ctx context.Context) error {
 
 	t.refreshPodkop(ctx)
 
-	t.mu.Lock()
-	available := t.updateAvailable
-	t.mu.Unlock()
-
-	if available {
-		if err := t.sendUpdatePodkopMenu(ctx); err != nil {
-			logger.Errf("send initial update menu: %v", err)
-		}
+	var sendErr error
+	if t.state.updateReady() {
+		sendErr = t.sendUpdatePodkopMenu(ctx)
 	} else {
-		if err := t.sendDefaultMenu(ctx); err != nil {
-			logger.Errf("send initial default menu: %v", err)
-		}
+		sendErr = t.sendDefaultMenu(ctx)
+	}
+	if sendErr != nil {
+		logger.Errf("send initial menu: %v", sendErr)
 	}
 
 	go t.periodicCheck(ctx)
@@ -137,18 +127,9 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 			return
 		case <-tick.C:
 			logger.Logf("Periodic podkop check")
-			t.mu.Lock()
-			prevLatest := t.latestVer
-			prevAvailable := t.updateAvailable
-			t.mu.Unlock()
-
+			_, prevLatest, prevAvailable, _ := t.state.snapshotPodkop()
 			t.refreshPodkop(ctx)
-
-			t.mu.Lock()
-			newLatest := t.latestVer
-			newAvailable := t.updateAvailable
-			oldMID := t.menuMID
-			t.mu.Unlock()
+			_, newLatest, newAvailable, oldMID := t.state.snapshotPodkop()
 
 			if !newAvailable {
 				continue
@@ -158,9 +139,7 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 				if oldMID != 0 {
 					_ = t.deleteMessage(ctx, oldMID)
 				}
-				t.mu.Lock()
-				t.menuMID = 0
-				t.mu.Unlock()
+				t.state.setMenuID(0)
 				if err := t.sendUpdatePodkopMenu(ctx); err != nil {
 					logger.Errf("send periodic update menu: %v", err)
 				}
@@ -173,7 +152,7 @@ func (t *Bot) chatIDStr() string {
 	return strconv.FormatInt(t.chatID, 10)
 }
 
-func (t *Bot) fallbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (t *Bot) fallbackHandler(_ context.Context, _ *bot.Bot, update *models.Update) {
 	// Silently ignore messages and callbacks from other chats.
 	if update.Message != nil && update.Message.Chat.ID != t.chatID {
 		return
