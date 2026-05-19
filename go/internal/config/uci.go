@@ -22,6 +22,7 @@ type Config struct {
 	ChatID        int64
 	CheckInterval time.Duration
 	EmergencyIPs  []string // space-separated UCI value, optional
+	MenuMID       int      // tracked Telegram menu message id, 0 if absent
 }
 
 func Load() (*Config, error) {
@@ -47,11 +48,18 @@ func Load() (*Config, error) {
 	if s, _ := uci.GetIn(uciPkg, uciSec, "emergency_ips"); s != "" {
 		ips = strings.Fields(s)
 	}
+	var menuMID int
+	if s, _ := uci.GetIn(uciPkg, uciSec, "menu_mid"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			menuMID = n
+		}
+	}
 	return &Config{
 		BotToken:      token,
 		ChatID:        chatID,
 		CheckInterval: time.Duration(hours) * time.Hour,
 		EmergencyIPs:  ips,
+		MenuMID:       menuMID,
 	}, nil
 }
 
@@ -59,6 +67,17 @@ func Load() (*Config, error) {
 func SaveEmergencyIPs(ips []string) error {
 	key := fmt.Sprintf("%s.%s.emergency_ips", uciPkg, uciSec)
 	if err := uci.Set(key, strings.Join(ips, " ")); err != nil {
+		return err
+	}
+	return uci.Commit(uciPkg)
+}
+
+// SaveMenuMID persists the tracked Telegram menu message id so the daemon
+// can resume editing the same message after a restart instead of posting a
+// fresh one.
+func SaveMenuMID(id int) error {
+	key := fmt.Sprintf("%s.%s.menu_mid", uciPkg, uciSec)
+	if err := uci.Set(key, strconv.Itoa(id)); err != nil {
 		return err
 	}
 	return uci.Commit(uciPkg)

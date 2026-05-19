@@ -136,14 +136,16 @@ func runDaemon() int {
 	go runEmergencyIPRefresh(ctx, dohHC, tt)
 
 	tb, err := telegram.New(telegram.Options{
-		Token:         cfg.BotToken,
-		ChatID:        cfg.ChatID,
-		Hostname:      readHostname(),
-		SelfVersion:   version,
-		HTTPClient:    hc,
-		CheckInterval: cfg.CheckInterval,
-		Runner:        runner,
-		DNSConfig:     dnsCfg,
+		Token:          cfg.BotToken,
+		ChatID:         cfg.ChatID,
+		Hostname:       readHostname(),
+		SelfVersion:    version,
+		HTTPClient:     hc,
+		CheckInterval:  cfg.CheckInterval,
+		Runner:         runner,
+		DNSConfig:      dnsCfg,
+		InitialMenuMID: cfg.MenuMID,
+		PersistMenuMID: persistMenuMID,
 	})
 	if err != nil {
 		logger.Errf("telegram: %v", err)
@@ -238,6 +240,15 @@ func dohEndpointsFromPodkop() []string {
 		return []string{ep}
 	}
 	return transport.DefaultDoHEndpoints
+}
+
+// persistMenuMID writes the tracked Telegram menu id to UCI. Best-effort —
+// errors are logged but not surfaced to the caller, since failing to
+// persist only means the next start posts a fresh menu (graceful regression).
+func persistMenuMID(id int) {
+	if err := config.SaveMenuMID(id); err != nil {
+		logger.Errf("persist menu_mid=%d: %v", id, err)
+	}
 }
 
 // mergeIPs returns the deduplicated, sorted union of two IP slices.

@@ -49,6 +49,14 @@ type Options struct {
 	CheckInterval time.Duration
 	Runner        UpdateRunner
 	DNSConfig     service.DNSConfig
+
+	// InitialMenuMID is the previously persisted Telegram menu message id
+	// (0 if none). When non-zero, Start edits that message instead of
+	// posting a new menu.
+	InitialMenuMID int
+	// PersistMenuMID is called whenever the tracked menu id changes so the
+	// next daemon start can pick up where we left off. nil disables persist.
+	PersistMenuMID func(int)
 }
 
 // New constructs a Bot and registers callback handlers. Call Start to begin
@@ -74,7 +82,7 @@ func New(opts Options) (*Bot, error) {
 		runner:        opts.Runner,
 		hc:            opts.HTTPClient,
 		dnsCfg:        opts.DNSConfig,
-		state:         newBotState(),
+		state:         newBotState(opts.InitialMenuMID, opts.PersistMenuMID),
 	}
 	b, err := bot.New(opts.Token,
 		bot.WithHTTPClient(60*time.Second+15*time.Second, opts.HTTPClient),

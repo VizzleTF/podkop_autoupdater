@@ -14,9 +14,21 @@ type botState struct {
 	selfLatest          string
 	selfUpdateAvailable bool
 	menuMID             int
+
+	// persistMID is invoked outside the mutex whenever menuMID changes to
+	// a new value, so the next daemon start can edit the same message
+	// instead of posting a fresh menu. nil disables persistence.
+	persistMID func(int)
 }
 
-func newBotState() *botState { return &botState{} }
+// newBotState seeds the state with the previously persisted menu id (0 if
+// none) and a persistence callback that records subsequent changes.
+func newBotState(initialMenuMID int, persistMID func(int)) *botState {
+	return &botState{
+		menuMID:    initialMenuMID,
+		persistMID: persistMID,
+	}
+}
 
 // snapshotPodkop returns the cached podkop fields and the tracked menu id
 // under a single lock acquisition.
@@ -103,11 +115,20 @@ func (s *botState) menuID() int {
 	return s.menuMID
 }
 
-// setMenuID overwrites the tracked menu id.
+// setMenuID overwrites the tracked menu id. No-op (and no persist call)
+// when id matches the cached value — avoids redundant UCI writes when
+// sendOrEdit succeeds and returns the same message_id.
 func (s *botState) setMenuID(id int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.menuMID == id {
+		s.mu.Unlock()
+		return
+	}
 	s.menuMID = id
+	s.mu.Unlock()
+	if s.persistMID != nil {
+		s.persistMID(id)
+	}
 }
 
 // adoptMenuID atomically replaces the tracked menu id and returns the
@@ -115,11 +136,15 @@ func (s *botState) setMenuID(id int) {
 // (clickedID, false) — caller should skip the orphan-cleanup step.
 func (s *botState) adoptMenuID(clickedID int) (oldID int, changed bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.menuMID == clickedID {
+		s.mu.Unlock()
 		return clickedID, false
 	}
 	oldID = s.menuMID
 	s.menuMID = clickedID
+	s.mu.Unlock()
+	if s.persistMID != nil {
+		s.persistMID(clickedID)
+	}
 	return oldID, true
 }
