@@ -58,21 +58,21 @@ jobs:
             -o dist/podkop_updater-${{ matrix.target }} \
             ./cmd/podkop_updater
 
-      - name: UPX compress
+      - name: UPX compress (in place)
         working-directory: go
         run: |
-          cp dist/podkop_updater-${{ matrix.target }} dist/podkop_updater-${{ matrix.target }}.upx
-          upx --best --lzma dist/podkop_updater-${{ matrix.target }}.upx || \
-            echo "upx failed, shipping uncompressed only"
+          if upx --best --lzma dist/podkop_updater-${{ matrix.target }}; then
+            echo "compressed OK"
+          else
+            echo "upx failed, shipping uncompressed"
+          fi
           ls -lh dist/
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: podkop_updater-${{ matrix.target }}
-          path: |
-            go/dist/podkop_updater-${{ matrix.target }}
-            go/dist/podkop_updater-${{ matrix.target }}.upx
+          path: go/dist/podkop_updater-${{ matrix.target }}
 
   release:
     name: Publish release

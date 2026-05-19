@@ -153,5 +153,7 @@ cascade (mock RoundTrippers, sticky behavior, all-fail).
 
 `../.github/workflows/release.yml` builds a five-architecture matrix
 (amd64, arm64, armv7, mipsle softfloat, mips softfloat) on push of any
-`v*` tag, optionally UPX-compresses each binary, and uploads both raw
-and `.upx` variants to the GitHub release.
+`v*` tag, UPX-packs each binary in place, and uploads one asset per arch
+(`podkop_updater-<arch>`) to the GitHub release. No `.upx` suffix — the
+packed binary is the only distributed artifact, so install.sh and
+self-update both fetch it under its plain name.

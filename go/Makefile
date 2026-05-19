@@ -31,14 +31,15 @@ build-all: clean
 	done
 	@ls -lh $(DIST)/
 
-# Optional: UPX pack after build-all. Skips if upx not installed.
+# Optional: UPX pack the build-all matrix in place. Skips if upx is missing.
+# Release CI does the same — install.sh and self-update fetch the packed file
+# under its plain name (no .upx suffix), so this matches the production layout.
 upx: build-all
 	@command -v upx >/dev/null || { echo "upx not installed, skipping"; exit 0; }
 	@for f in $(DIST)/$(BINARY)-*; do \
-	  case $$f in *.upx) continue;; esac; \
-	  cp $$f $$f.upx; \
-	  upx --best --lzma $$f.upx 2>&1 | tail -1 || echo "upx failed for $$f"; \
+	  upx --best --lzma $$f 2>&1 | tail -1 || echo "upx failed for $$f"; \
 	done
+	@ls -lh $(DIST)/
 
 test:
 	go test ./...

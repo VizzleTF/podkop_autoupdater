@@ -16,7 +16,7 @@ All `make` targets run from `go/`:
 cd go
 make build           # current host → dist/podkop_updater
 make build-all       # cross-compile amd64, arm64, armv7, mipsle, mips (softfloat)
-make upx             # UPX-pack the build-all matrix (skips if upx missing)
+make upx             # UPX-pack the build-all matrix in place (skips if upx missing)
 make test            # go test ./...
 make fmt vet tidy    # standard hygiene
 ```
@@ -28,7 +28,7 @@ cd go
 go test ./internal/transport -run TestTierCascade -v
 ```
 
-Release: push an annotated `v*` tag from `main`. The workflow builds the five-arch matrix, UPX-compresses, and uploads both raw and `.upx` assets to a GitHub release.
+Release: push an annotated `v*` tag from `main`. The workflow builds the five-arch matrix, UPX-packs each binary in place, and uploads one asset per arch (`podkop_updater-<arch>`) to a GitHub release. Asset names carry no `.upx` suffix — the packed binary is the distributed artifact.
 
 ## Architecture
 
