@@ -51,8 +51,14 @@ sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater
 uci set podkop_updater.settings.bot_token="ВАШ_ТОКЕН"
 uci set podkop_updater.settings.chat_id="ВАШ_CHAT_ID"
 uci set podkop_updater.settings.check_interval=6   # часы
+uci set podkop_updater.settings.router_label="Дом"  # опционально: показывается в шапке сообщения
 uci commit podkop_updater
 ```
+
+`router_label` опционально. Удобно задать, когда несколько демонов (с
+разными ботами) пишут в один общий чат или топик супергруппы — тогда в
+шапке каждого сообщения жирным выводится имя роутера, и видно, от кого
+оно пришло. Если поле не задано, в шапку идёт hostname системы.
 
 Демон сам пишет обнаруженные аварийные IP в
 `podkop_updater.settings.emergency_ips` (через пробел).

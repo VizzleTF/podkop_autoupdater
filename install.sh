@@ -86,6 +86,8 @@ else
     echo "Auto-check interval in hours (default 6):"
     read -r INTERVAL
     [ -z "$INTERVAL" ] && INTERVAL=6
+    echo "Router label shown in chat (e.g. 'Home', 'Dacha'; leave empty to use hostname):"
+    read -r ROUTER_LABEL
 
     [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
     uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null || true
@@ -93,6 +95,7 @@ else
     uci set "${UCI_PKG}.${UCI_SEC}.bot_token=${TOKEN}"
     uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT}"
     uci set "${UCI_PKG}.${UCI_SEC}.check_interval=${INTERVAL}"
+    [ -n "$ROUTER_LABEL" ] && uci set "${UCI_PKG}.${UCI_SEC}.router_label=${ROUTER_LABEL}"
     uci commit "${UCI_PKG}"
     step "UCI saved to /etc/config/${UCI_PKG}"
 fi

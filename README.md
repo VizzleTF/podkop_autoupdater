@@ -52,8 +52,14 @@ Settings live in UCI (`/etc/config/podkop_updater`):
 uci set podkop_updater.settings.bot_token="YOUR_TOKEN"
 uci set podkop_updater.settings.chat_id="YOUR_CHAT_ID"
 uci set podkop_updater.settings.check_interval=6   # hours
+uci set podkop_updater.settings.router_label="Home"  # optional: shown in message header
 uci commit podkop_updater
 ```
+
+`router_label` is optional. Set it to disambiguate routers when several
+daemons (each with its own bot) post into the same chat or supergroup
+topic; the label is prepended in bold to every menu message. When empty,
+the daemon falls back to the system hostname.
 
 The daemon also writes the discovered emergency IP list back to
 `podkop_updater.settings.emergency_ips` (space-separated).

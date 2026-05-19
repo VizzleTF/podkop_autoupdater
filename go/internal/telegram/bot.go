@@ -30,7 +30,7 @@ type UpdateRunner interface {
 type Bot struct {
 	chatID        int64
 	checkInterval time.Duration
-	hostname      string
+	label         string
 	selfVer       string
 	runner        UpdateRunner
 	hc            *http.Client
@@ -43,7 +43,7 @@ type Bot struct {
 type Options struct {
 	Token         string
 	ChatID        int64
-	Hostname      string
+	Label         string // identifier shown in message header (hostname or user-set router label)
 	SelfVersion   string // compile-time version of this binary
 	HTTPClient    *http.Client
 	CheckInterval time.Duration
@@ -77,7 +77,7 @@ func New(opts Options) (*Bot, error) {
 	tb := &Bot{
 		chatID:        opts.ChatID,
 		checkInterval: opts.CheckInterval,
-		hostname:      opts.Hostname,
+		label:         opts.Label,
 		selfVer:       opts.SelfVersion,
 		runner:        opts.Runner,
 		hc:            opts.HTTPClient,
@@ -106,6 +106,7 @@ func (t *Bot) Start(ctx context.Context) error {
 	}
 	logger.Logf("Telegram bot connected as @%s", me.Username)
 
+	t.publishCommands(ctx)
 	t.refreshPodkop(ctx)
 
 	var sendErr error
@@ -158,6 +159,26 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 
 func (t *Bot) chatIDStr() string {
 	return strconv.FormatInt(t.chatID, 10)
+}
+
+// publishCommands tells Telegram which slash commands the bot understands
+// so they show up in the "/" suggestions in chat. Called at every startup
+// (idempotent) so the list always matches what registerHandlers wires up,
+// overwriting stale lists left by previous bot versions or BotFather.
+func (t *Bot) publishCommands(ctx context.Context) {
+	_, err := t.b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
+		Commands: []models.BotCommand{
+			{Command: "menu", Description: "Открыть меню"},
+			{Command: "start", Description: "Запуск"},
+			{Command: "check_podkop", Description: "Проверить podkop"},
+			{Command: "check_self", Description: "Проверить updater"},
+			{Command: "check_dns", Description: "Проверить DNS"},
+			{Command: "restart", Description: "Перезагрузить podkop"},
+		},
+	})
+	if err != nil {
+		logger.Errf("setMyCommands: %v", err)
+	}
 }
 
 func (t *Bot) fallbackHandler(_ context.Context, _ *bot.Bot, update *models.Update) {

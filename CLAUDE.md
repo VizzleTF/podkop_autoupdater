@@ -73,6 +73,7 @@ After every restart/update, polls `fakeip.podkop.fyi` via `127.0.0.42` every 2s 
 | `bot_token`     | string | Telegram bot token (required)                               |
 | `chat_id`       | int    | Telegram chat ID (required)                                 |
 | `check_interval`| int    | Hours between podkop version checks (default 6)             |
+| `router_label`  | string | Optional human-readable router name; prefixed in bold to every menu message via `Bot.withLabel`. Empty = fall back to hostname. Useful when multiple routers post into one shared chat. |
 | `emergency_ips` | string | Space-separated; written by the daemon, read on next start  |
 | `menu_mid`      | int    | Tracked Telegram menu message ID; written on every transition |
 

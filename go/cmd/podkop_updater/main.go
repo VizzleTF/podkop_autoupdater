@@ -135,10 +135,14 @@ func runDaemon() int {
 	dohHC := &http.Client{Timeout: 10 * time.Second}
 	go runEmergencyIPRefresh(ctx, dohHC, tt)
 
+	label := cfg.RouterLabel
+	if label == "" {
+		label = readHostname()
+	}
 	tb, err := telegram.New(telegram.Options{
 		Token:          cfg.BotToken,
 		ChatID:         cfg.ChatID,
-		Hostname:       readHostname(),
+		Label:          label,
 		SelfVersion:    version,
 		HTTPClient:     hc,
 		CheckInterval:  cfg.CheckInterval,

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"html"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -57,12 +58,22 @@ func (t *Bot) sendUpdatePodkopMenu(ctx context.Context) error {
 // replaceMenu edits the tracked menu (or sends fresh if none) and updates
 // menuMID. Used by send* paths that propagate errors to the caller.
 func (t *Bot) replaceMenu(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) error {
-	newMID, err := t.sendOrEdit(ctx, t.state.menuID(), text, kb)
+	newMID, err := t.sendOrEdit(ctx, t.state.menuID(), t.withLabel(text), kb)
 	if err != nil {
 		return err
 	}
 	t.state.setMenuID(newMID)
 	return nil
+}
+
+// withLabel prepends a single-line bold router label to text so each message
+// in a shared chat (e.g. when multiple routers post to one supergroup) is
+// attributable. Empty label leaves text untouched.
+func (t *Bot) withLabel(text string) string {
+	if t.label == "" {
+		return text
+	}
+	return "<b>" + html.EscapeString(t.label) + "</b>\n" + text
 }
 
 // updateMenu is the fire-and-log variant used by callback handlers: edit
@@ -91,10 +102,11 @@ func (t *Bot) editUpdateAvailable(ctx context.Context, text string, kb *models.I
 	t.updateMenu(ctx, text, kb)
 }
 
-// defaultText builds the title shown in the steady-state menu. The installed
-// podkop version is passed in so the caller controls lock scope.
+// defaultText builds the body shown in the steady-state menu. The label
+// header is added by replaceMenu via withLabel, so we just emit the body.
+// The installed podkop version is passed in so the caller controls lock scope.
 func (t *Bot) defaultText(installed string) string {
-	text := "<b>Podkop Updater</b> on <b>" + t.hostname + "</b>"
+	text := "Podkop Updater"
 	if installed != "" {
 		text += "\npodkop: " + installed
 	}

@@ -24,6 +24,23 @@ func (t *Bot) registerHandlers() {
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_ok", bot.MatchTypeExact, t.onOK)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, t.onStartOrMenu)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/menu", bot.MatchTypeExact, t.onStartOrMenu)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/check_podkop", bot.MatchTypeExact, t.onTextCheckPodkop)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/check_self", bot.MatchTypeExact, t.onTextCheckSelf)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/check_dns", bot.MatchTypeExact, t.onTextCheckDNS)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/restart", bot.MatchTypeExact, t.onTextRestart)
+}
+
+// startTextCommand is the entry guard shared by every slash-command handler:
+// filters chat, logs the command, and resets the tracked menu id so the
+// resulting busy/result flow lands in a fresh message instead of replacing
+// the menu the user was looking at.
+func (t *Bot) startTextCommand(update *models.Update, name string) bool {
+	if update.Message == nil || update.Message.Chat.ID != t.chatID {
+		return false
+	}
+	logger.Logf("Text command: %s", name)
+	t.state.setMenuID(0)
+	return true
 }
 
 func (t *Bot) answer(ctx context.Context, cb *models.CallbackQuery) {
@@ -103,56 +120,86 @@ func (t *Bot) runVersionCheck(ctx context.Context, vc versionCheck) {
 	}
 }
 
-// onCheckPodkop: проверка версии podkop.
-func (t *Bot) onCheckPodkop(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_check_podkop") {
-		return
-	}
-	t.runVersionCheck(ctx, versionCheck{
+// podkopVC describes the version-check flow for podkop. Defined as a method
+// so both onCheckPodkop (callback) and onTextCheckPodkop (slash command)
+// share the same configuration.
+func (t *Bot) podkopVC() versionCheck {
+	return versionCheck{
 		busyText:  "Проверка podkop...",
 		refreshFn: t.refreshPodkop,
 		readState: func() (string, string, bool) {
 			installed, latest, available, _ := t.state.snapshotPodkop()
 			return installed, latest, available
 		},
-		kbUpdate:    kbUpdatePodkop,
-		errText:     "Ошибка проверки podkop. Подробности в логе.",
-		upAvailText: func(latest string) string { return "Доступна новая версия podkop: <b>" + latest + "</b>" },
+		kbUpdate: kbUpdatePodkop,
+		errText:  "Ошибка проверки podkop. Подробности в логе.",
+		upAvailText: func(latest string) string {
+			return "Доступна новая версия podkop: <b>" + latest + "</b>"
+		},
 		noUpdateText: func(current, latest, checkTime string) string {
 			return "Нет обновлений podkop\nУстановлено: " + current +
 				"\nПоследнее: " + latest + "\nПроверено: " + checkTime
 		},
-	})
+	}
 }
 
-// onCheckSelf: проверка версии podkop_updater.
-func (t *Bot) onCheckSelf(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_check_self") {
-		return
-	}
-	t.runVersionCheck(ctx, versionCheck{
+// selfVC describes the version-check flow for the updater itself; symmetric
+// to podkopVC.
+func (t *Bot) selfVC() versionCheck {
+	return versionCheck{
 		busyText:  "Проверка updater...",
 		refreshFn: t.refreshSelf,
 		readState: func() (string, string, bool) {
 			latest, available := t.state.snapshotSelf()
 			return t.selfVer, latest, available
 		},
-		kbUpdate:    kbUpdateSelf,
-		errText:     "Нет опубликованных релизов updater пока.",
-		upAvailText: func(latest string) string { return "Доступна новая версия updater: <b>" + latest + "</b>" },
+		kbUpdate: kbUpdateSelf,
+		errText:  "Нет опубликованных релизов updater пока.",
+		upAvailText: func(latest string) string {
+			return "Доступна новая версия updater: <b>" + latest + "</b>"
+		},
 		noUpdateText: func(current, latest, checkTime string) string {
 			return "Нет обновлений updater\nУстановлено: " + current +
 				"\nПоследнее: " + latest + "\nПроверено: " + checkTime
 		},
-	})
+	}
 }
 
-// onCheckDNS: показать статус DNS подкопа + fakeip.
-func (t *Bot) onCheckDNS(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_check_dns") {
+// onCheckPodkop: проверка версии podkop (callback).
+func (t *Bot) onCheckPodkop(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.handleCallback(ctx, update, "cmd_check_podkop") {
 		return
 	}
+	t.runVersionCheck(ctx, t.podkopVC())
+}
 
+// onCheckSelf: проверка версии podkop_updater (callback).
+func (t *Bot) onCheckSelf(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.handleCallback(ctx, update, "cmd_check_self") {
+		return
+	}
+	t.runVersionCheck(ctx, t.selfVC())
+}
+
+// onTextCheckPodkop: /check_podkop — то же, что кнопка, но в новом сообщении.
+func (t *Bot) onTextCheckPodkop(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.startTextCommand(update, "/check_podkop") {
+		return
+	}
+	t.runVersionCheck(ctx, t.podkopVC())
+}
+
+// onTextCheckSelf: /check_self — симметрично onTextCheckPodkop.
+func (t *Bot) onTextCheckSelf(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.startTextCommand(update, "/check_self") {
+		return
+	}
+	t.runVersionCheck(ctx, t.selfVC())
+}
+
+// doCheckDNS is the actual DNS-status flow, used by both callback and
+// text-command entry points.
+func (t *Bot) doCheckDNS(ctx context.Context) {
 	t.editBusy(ctx, "Проверка DNS...")
 
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -181,6 +228,22 @@ func (t *Bot) onCheckDNS(ctx context.Context, _ *bot.Bot, update *models.Update)
 	t.editResult(ctx, text)
 }
 
+// onCheckDNS: показать статус DNS подкопа + fakeip (callback).
+func (t *Bot) onCheckDNS(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.handleCallback(ctx, update, "cmd_check_dns") {
+		return
+	}
+	t.doCheckDNS(ctx)
+}
+
+// onTextCheckDNS: /check_dns — то же, что кнопка, но в новом сообщении.
+func (t *Bot) onTextCheckDNS(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.startTextCommand(update, "/check_dns") {
+		return
+	}
+	t.doCheckDNS(ctx)
+}
+
 func dnsOK(v int) string {
 	if v == 1 {
 		return "✅"
@@ -188,12 +251,9 @@ func dnsOK(v int) string {
 	return "❌"
 }
 
-// onRestart: перезагрузка podkop.
-func (t *Bot) onRestart(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_restart") {
-		return
-	}
-
+// doRestart is the actual restart flow, used by both callback and
+// text-command entry points.
+func (t *Bot) doRestart(ctx context.Context) {
 	t.editBusy(ctx, "Перезагрузка podkop...")
 
 	if t.runner == nil {
@@ -207,6 +267,22 @@ func (t *Bot) onRestart(ctx context.Context, _ *bot.Bot, update *models.Update) 
 		return
 	}
 	t.editResult(ctx, "Готово\n"+status)
+}
+
+// onRestart: перезагрузка podkop (callback).
+func (t *Bot) onRestart(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.handleCallback(ctx, update, "cmd_restart") {
+		return
+	}
+	t.doRestart(ctx)
+}
+
+// onTextRestart: /restart — то же, что кнопка, но в новом сообщении.
+func (t *Bot) onTextRestart(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if !t.startTextCommand(update, "/restart") {
+		return
+	}
+	t.doRestart(ctx)
 }
 
 // onUpdatePodkop: запуск обновления podkop.

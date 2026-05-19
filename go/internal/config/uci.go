@@ -23,6 +23,7 @@ type Config struct {
 	CheckInterval time.Duration
 	EmergencyIPs  []string // space-separated UCI value, optional
 	MenuMID       int      // tracked Telegram menu message id, 0 if absent
+	RouterLabel   string   // optional human-readable router name shown in message header; empty = fall back to hostname
 }
 
 func Load() (*Config, error) {
@@ -54,12 +55,14 @@ func Load() (*Config, error) {
 			menuMID = n
 		}
 	}
+	label, _ := uci.GetIn(uciPkg, uciSec, "router_label")
 	return &Config{
 		BotToken:      token,
 		ChatID:        chatID,
 		CheckInterval: time.Duration(hours) * time.Hour,
 		EmergencyIPs:  ips,
 		MenuMID:       menuMID,
+		RouterLabel:   label,
 	}, nil
 }
 
