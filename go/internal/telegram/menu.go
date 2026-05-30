@@ -3,7 +3,9 @@ package telegram
 import (
 	"context"
 	"html"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -11,20 +13,9 @@ import (
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
 )
 
-// Inline keyboards (typed values, no raw JSON).
+// Static inline keyboards (typed values, no raw JSON). The dashboard's main
+// keyboard is built dynamically in buildDashboardKB.
 var (
-	kbDefault = &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{
-			{{Text: "🔍 Проверить podkop", CallbackData: "cmd_check_podkop"}},
-			{{Text: "⬆️ Проверить updater", CallbackData: "cmd_check_self"}},
-			{{Text: "🌐 Проверить DNS", CallbackData: "cmd_check_dns"}},
-			{{Text: "🔄 Перезагрузить podkop", CallbackData: "cmd_restart"}},
-			{
-				{Text: "📊 Статус", CallbackData: "cmd_status"},
-				{Text: "📜 Лог", CallbackData: "cmd_log"},
-			},
-		},
-	}
 	kbOK = &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{{Text: "✅ ОК", CallbackData: "cmd_ok"}},
@@ -45,24 +36,87 @@ var (
 	}
 )
 
-// sendDefaultMenu renders the steady-state 3-button menu.
-func (t *Bot) sendDefaultMenu(ctx context.Context) error {
-	return t.replaceMenu(ctx, t.defaultText(t.state.installed()), kbDefault)
+// buildDashboardKB assembles the steady-state keyboard. Contextual update
+// rows appear first when an update is available; the destructive rollback
+// lives at the bottom row, separated from the diagnostics.
+func buildDashboardKB(updPodkop, updSelf bool) *models.InlineKeyboardMarkup {
+	var rows [][]models.InlineKeyboardButton
+	if updPodkop {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: "⬆️ Обновить podkop", CallbackData: "cmd_update_podkop"},
+		})
+	}
+	if updSelf {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: "⬆️ Обновить updater", CallbackData: "cmd_update_self"},
+		})
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{
+			{Text: "🔄 Проверить статус", CallbackData: "cmd_refresh"},
+			{Text: "♻️ Рестарт", CallbackData: "cmd_restart"},
+		},
+		[]models.InlineKeyboardButton{
+			{Text: "📦 Бэкапы", CallbackData: "cmd_backups"},
+		},
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// sendUpdatePodkopMenu shows the "podkop update available" prompt as a fresh
-// message (caller is expected to have already deleted the previous one when
-// triggered by the periodic check).
+// buildBackupsKB is the keyboard for the 📦 Бэкапы submenu.
+func buildBackupsKB() *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{
+		InlineKeyboard: [][]models.InlineKeyboardButton{
+			{{Text: "💾 Создать бэкап конфига", CallbackData: "cmd_backup"}},
+			{
+				{Text: "📂 Восстановить", CallbackData: "cmd_restore"},
+				{Text: "🗑 Удалить", CallbackData: "cmd_bk_delete"},
+			},
+			{{Text: "↩️ Откат версии podkop", CallbackData: "cmd_rollback"}},
+			{{Text: "‹ Назад", CallbackData: "cmd_ok"}},
+		},
+	}
+}
+
+// sendBackupsMenu renders the backups submenu, listing the current backup
+// count, into the tracked message.
+func (t *Bot) sendBackupsMenu(ctx context.Context) {
+	text := "📦 <b>Бэкапы конфига podkop</b>"
+	if t.runner != nil {
+		if vs, err := t.runner.ListBackupVersions(); err == nil {
+			text += "\nСохранённых версий: " + strconv.Itoa(len(vs))
+		}
+	}
+	text += "\n\nСоздать снимок конфига, восстановить из снимка, удалить лишний или откатить версию podkop."
+	t.updateMenu(ctx, text, buildBackupsKB())
+}
+
+// sendDefaultMenu renders the dashboard: a status card plus the dynamic
+// keyboard (with contextual update rows when available).
+func (t *Bot) sendDefaultMenu(ctx context.Context) error {
+	_, _, podkopUpd, _ := t.state.snapshotPodkop()
+	_, selfUpd := t.state.snapshotSelf()
+	// The dashboard card carries its own header, so skip the withLabel prefix.
+	return t.replaceMenuRaw(ctx, t.dashboardText(), buildDashboardKB(podkopUpd, selfUpd))
+}
+
+// sendUpdatePodkopMenu re-renders the dashboard as a fresh message so the
+// periodic check raises a Telegram notification (the dashboard already
+// surfaces the "Обновить podkop" row when an update is available).
 func (t *Bot) sendUpdatePodkopMenu(ctx context.Context) error {
-	installed, latest := t.state.installedAndLatest()
-	text := "Доступна новая версия podkop: <b>" + latest + "</b>\nТекущая: " + installed
-	return t.replaceMenu(ctx, text, kbUpdatePodkop)
+	return t.sendDefaultMenu(ctx)
 }
 
 // replaceMenu edits the tracked menu (or sends fresh if none) and updates
-// menuMID. Used by send* paths that propagate errors to the caller.
+// menuMID. Prepends the bold router label via withLabel.
 func (t *Bot) replaceMenu(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) error {
-	newMID, err := t.sendOrEdit(ctx, t.state.menuID(), t.withLabel(text), kb)
+	return t.replaceMenuRaw(ctx, t.withLabel(text), kb)
+}
+
+// replaceMenuRaw is replaceMenu without the withLabel prefix, for text that
+// already carries its own header (the dashboard card).
+func (t *Bot) replaceMenuRaw(ctx context.Context, text string, kb *models.InlineKeyboardMarkup) error {
+	newMID, err := t.sendOrEdit(ctx, t.state.menuID(), text, kb)
 	if err != nil {
 		return err
 	}
@@ -106,18 +160,56 @@ func (t *Bot) editUpdateAvailable(ctx context.Context, text string, kb *models.I
 	t.updateMenu(ctx, text, kb)
 }
 
-// defaultText builds the body shown in the steady-state menu. The label
-// header is added by replaceMenu via withLabel, so we just emit the body.
-// The installed podkop version is passed in so the caller controls lock scope.
-func (t *Bot) defaultText(installed string) string {
-	text := "Podkop Updater"
-	if installed != "" {
-		text += "\npodkop: " + installed
+// dashboardText builds the status card shown in the steady-state menu. It is
+// emitted as normal HTML (not <pre>): emoji render full-width and break
+// monospace alignment, so a framed list reads better than padded columns.
+// The router label is the card header here, so sendDefaultMenu sends it
+// without the withLabel prefix. All data comes from cached state (no
+// network) — the "🔍 Проверить" button refreshes it.
+func (t *Bot) dashboardText() string {
+	installed, latest, podkopUpd, _ := t.state.snapshotPodkop()
+	selfLatest, selfUpd := t.state.snapshotSelf()
+
+	var b strings.Builder
+	if t.label != "" {
+		b.WriteString("🏠 <b>" + html.EscapeString(t.label) + "</b>\n")
+	} else {
+		b.WriteString("🤖 <b>Podkop Updater</b>\n")
 	}
-	if t.selfVer != "" {
-		text += "\nupdater: " + t.selfVer
+	b.WriteString("├ 📦 <b>podkop</b>  <code>" + orDash(installed) + "</code>  " + verState(podkopUpd, latest) + "\n")
+	b.WriteString("├ 🛠 <b>updater</b> <code>" + orDash(t.selfVer) + "</code>  " + verState(selfUpd, selfLatest) + "\n")
+
+	if ip, ok, checked := t.state.dnsSnapshot(); checked {
+		mark := "✅"
+		if !ok {
+			mark = "❌"
+		}
+		b.WriteString("├ 🌐 <b>DNS</b>     " + mark + " <code>" + html.EscapeString(ip) + "</code>\n")
+	} else {
+		b.WriteString("├ 🌐 <b>DNS</b>     — нажми «Проверить»\n")
 	}
-	return text
+
+	tier := "—"
+	if t.tiers != nil {
+		tier = orDash(t.tiers.CurrentTier())
+	}
+	b.WriteString("├ 🔌 <b>канал</b>   <code>" + html.EscapeString(tier) + "</code>\n")
+
+	if lc := t.state.lastCheckTime(); !lc.IsZero() {
+		b.WriteString("└ 🕐 " + lc.Format("15:04:05") + " · " + humanizeSince(time.Since(lc)) + " назад")
+	} else {
+		b.WriteString("└ 🕐 —")
+	}
+	return b.String()
+}
+
+// verState renders the status column of a version row: a checkmark when up to
+// date, or "→ <latest> ⬆️" when an update is available.
+func verState(updateAvailable bool, latest string) string {
+	if updateAvailable && latest != "" {
+		return "→ <b>" + latest + "</b> ⬆️"
+	}
+	return "✅"
 }
 
 // sendOrEdit edits the existing message (when msgID != 0) or sends a fresh

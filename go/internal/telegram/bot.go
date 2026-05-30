@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/VizzleTF/podkop_autoupdater/go/internal/cfgbackup"
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/service"
 )
@@ -20,8 +21,16 @@ import (
 // bot does not depend on the runner implementation directly.
 type UpdateRunner interface {
 	RunUpdate(ctx context.Context, targetVersion, tag string) (statusText string, err error)
+	RunDowngrade(ctx context.Context, targetVersion, tag string) (statusText string, err error)
 	RunRestart(ctx context.Context) (statusText string, err error)
 	RunSelfUpdate(ctx context.Context) (statusText string, err error)
+
+	BackupConfig(version string) (path string, err error)
+	ListBackupVersions() ([]string, error)
+	ListBackupsForVersion(version string) ([]cfgbackup.Entry, error)
+	HasConfigBackup(version string) bool
+	RestoreConfig(ctx context.Context, backupID string) (statusText string, err error)
+	DeleteBackup(backupID string) error
 }
 
 // TierReporter exposes the live transport state for the /status command,
@@ -137,7 +146,7 @@ func (t *Bot) Start(ctx context.Context) error {
 	logger.Logf("Telegram bot connected as @%s", me.Username)
 
 	t.publishCommands(ctx)
-	t.refreshPodkop(ctx)
+	t.refreshAll(ctx)
 
 	var sendErr error
 	if t.state.updateReady() {
@@ -168,8 +177,7 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 			logger.Logf("Periodic check")
 			_, prevLatest, prevAvailable, _ := t.state.snapshotPodkop()
 			prevSelfLatest, prevSelfAvail := t.state.snapshotSelf()
-			t.refreshPodkop(ctx)
-			t.refreshSelf(ctx)
+			t.refreshAll(ctx)
 			_, newLatest, newAvailable, oldMID := t.state.snapshotPodkop()
 
 			if newAvailable && (!prevAvailable || newLatest != prevLatest) {

@@ -20,6 +20,23 @@ type botState struct {
 	menuMID             int
 	lastCheck           time.Time // wall-clock of the most recent successful podkop refresh
 
+	dnsIP      string // last fakeip probe result (ip or error string)
+	dnsOK      bool   // whether the last fakeip probe landed in range
+	dnsChecked bool   // whether a probe has run at least once this session
+
+	// rollbackTarget/Tag hold the version the user is about to roll back to,
+	// staged by the rollback-prompt step (or by a broken update) and consumed
+	// by the confirm step.
+	rollbackTarget string
+	rollbackTag    string
+
+	// restoreTarget holds the backup id the user is about to restore
+	// (config-only, no package change); deleteTarget holds the backup id the
+	// user is about to delete. Both are staged by their prompt step and
+	// consumed by the matching confirm step.
+	restoreTarget string
+	deleteTarget  string
+
 	// busy guards long-running side effects (restart/update/self-update) so a
 	// double-click or an overlapping auto-update can't run two install.sh
 	// invocations as root concurrently.
@@ -109,6 +126,65 @@ func (s *botState) clearBusy() {
 	s.mu.Lock()
 	s.busy = false
 	s.mu.Unlock()
+}
+
+// setDNS records the latest fakeip probe result for the dashboard card.
+func (s *botState) setDNS(ip string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dnsIP = ip
+	s.dnsOK = ok
+	s.dnsChecked = true
+}
+
+// dnsSnapshot returns the cached fakeip probe result.
+func (s *botState) dnsSnapshot() (ip string, ok, checked bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dnsIP, s.dnsOK, s.dnsChecked
+}
+
+// setRollback stages the rollback target consumed by the confirm step.
+func (s *botState) setRollback(version, tag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rollbackTarget = version
+	s.rollbackTag = tag
+}
+
+// rollback returns the staged rollback target.
+func (s *botState) rollback() (version, tag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rollbackTarget, s.rollbackTag
+}
+
+// setRestore stages the config-restore target.
+func (s *botState) setRestore(version string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restoreTarget = version
+}
+
+// restore returns the staged config-restore target.
+func (s *botState) restore() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restoreTarget
+}
+
+// setDelete stages the backup id to delete.
+func (s *botState) setDelete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleteTarget = id
+}
+
+// delete returns the staged delete target.
+func (s *botState) deleteID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteTarget
 }
 
 // updateReady reports whether a podkop update is currently advertised.

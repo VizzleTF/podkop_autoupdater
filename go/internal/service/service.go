@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/VizzleTF/podkop_autoupdater/go/internal/cfgbackup"
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/selfupdate"
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/updater"
@@ -48,10 +49,11 @@ type Runner struct {
 	hc      *http.Client
 	logPath string
 	dns     DNSConfig
+	cfg     *cfgbackup.Store
 }
 
 func NewRunner(hc *http.Client, logPath string, dns DNSConfig) *Runner {
-	return &Runner{hc: hc, logPath: logPath, dns: dns}
+	return &Runner{hc: hc, logPath: logPath, dns: dns, cfg: cfgbackup.New("")}
 }
 
 // RunRestart restarts the podkop service and polls the fakeip DNS check

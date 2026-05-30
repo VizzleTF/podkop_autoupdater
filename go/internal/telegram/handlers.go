@@ -21,8 +21,24 @@ func (t *Bot) registerHandlers() {
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restart", bot.MatchTypeExact, t.onRestart)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_update_podkop", bot.MatchTypeExact, t.onUpdatePodkop)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_update_self", bot.MatchTypeExact, t.onUpdateSelf)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_refresh", bot.MatchTypeExact, t.onRefresh)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_status", bot.MatchTypeExact, t.onStatus)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_log", bot.MatchTypeExact, t.onLog)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_backups", bot.MatchTypeExact, t.onBackups)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_backup", bot.MatchTypeExact, t.onBackup)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restore", bot.MatchTypeExact, t.onRestore)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_bk_delete", bot.MatchTypeExact, t.onDelete)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_del_ver:", bot.MatchTypePrefix, t.onDeleteVer)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_del_id:", bot.MatchTypePrefix, t.onDeleteID)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_del_confirm", bot.MatchTypeExact, t.onDeleteConfirm)
+	// Prefix handlers carry the chosen version / backup id after the ':'.
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restore_ver:", bot.MatchTypePrefix, t.onRestoreVer)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restore_id:", bot.MatchTypePrefix, t.onRestoreID)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restore_confirm", bot.MatchTypeExact, t.onRestoreConfirm)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback", bot.MatchTypeExact, t.onRollback)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_all", bot.MatchTypeExact, t.onRollbackAll)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_to:", bot.MatchTypePrefix, t.onRollbackTo)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_confirm", bot.MatchTypeExact, t.onRollbackConfirm)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_ok", bot.MatchTypeExact, t.onOK)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, t.onStartOrMenu)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/menu", bot.MatchTypeExact, t.onStartOrMenu)
@@ -365,13 +381,16 @@ func (t *Bot) onUpdatePodkop(ctx context.Context, _ *bot.Bot, update *models.Upd
 }
 
 // performPodkopUpdate runs the podkop update flow against the cached target
-// version/tag and renders the result. The caller owns the busy guard.
+// version/tag and renders the result. The caller owns the busy guard. If the
+// post-update DNS check did not recover, the result offers a one-tap rollback
+// to the version that was installed before the update.
 func (t *Bot) performPodkopUpdate(ctx context.Context) {
 	target, tag := t.state.latestAndTag()
 	if target == "" {
 		t.editResult(ctx, "Нет данных о новой версии podkop")
 		return
 	}
+	before := t.state.installed()
 	t.editBusy(ctx, "Обновление podkop до "+target+"...")
 
 	if t.runner == nil {
@@ -385,6 +404,12 @@ func (t *Bot) performPodkopUpdate(ctx context.Context) {
 		return
 	}
 	t.refreshPodkop(ctx)
+	// A post-update DNS failure is flagged by RunUpdate with this marker.
+	if before != "" && strings.Contains(status, "DNS не поднялся") {
+		t.state.setRollback(before, before) // podkop tags are bare versions
+		t.editResultWithRollback(ctx, "Готово\n"+status, before)
+		return
+	}
 	t.editResult(ctx, "Готово\n"+status)
 }
 
@@ -447,6 +472,17 @@ func (t *Bot) refreshPodkop(ctx context.Context) {
 	available := updater.IsNewer(installed, latest)
 	t.state.setPodkopFetch(installed, latest, tag, available, time.Now())
 	logger.Logf("podkop check: installed=%s latest=%s tag=%s update=%v", installed, latest, tag, available)
+}
+
+// refreshAll refreshes podkop + updater versions and probes fakeip DNS, so
+// the dashboard card reflects current reality. Used by the 🔍 Проверить button.
+func (t *Bot) refreshAll(ctx context.Context) {
+	t.refreshPodkop(ctx)
+	t.refreshSelf(ctx)
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ip, ok := service.FakeIPProbe(dctx, t.dnsCfg)
+	t.state.setDNS(ip, ok)
 }
 
 // refreshSelf fetches latest podkop_autoupdater release and compares with

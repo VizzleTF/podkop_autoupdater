@@ -63,13 +63,15 @@ func (t *Bot) onTextLog(ctx context.Context, _ *bot.Bot, update *models.Update) 
 	t.sendText(ctx, "<b>Лог</b>\n<pre>"+escapePre(tail)+"</pre>")
 }
 
-// onStatus: статус демона (callback). Renders into the tracked menu with an
-// ОК button so the user returns to the default menu afterwards.
+// onStatus: 📊 Статус (callback) — redraw the dashboard card from cache
+// (instant, no network). The 🔍 Проверить button is the networked refresh.
 func (t *Bot) onStatus(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	if !t.handleCallback(ctx, update, "cmd_status") {
 		return
 	}
-	t.editResult(ctx, t.statusText())
+	if err := t.sendDefaultMenu(ctx); err != nil {
+		logger.Errf("status redraw: %v", err)
+	}
 }
 
 // onLog: последние строки лога (callback).
