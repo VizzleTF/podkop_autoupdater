@@ -8,33 +8,38 @@ trigger updates and restarts from chat. Implemented as a single static Go
 binary managed by procd.
 
 ## Features
-- Persistent Telegram menu: check podkop version, check updater version,
-  check DNS, restart podkop, plus **status** and **log** buttons
-- Inline-edit flow: every action edits the same message through busy →
-  result transitions
-- Slash commands mirror the buttons: `/menu`, `/check_podkop`,
-  `/check_self`, `/check_dns`, `/restart`, `/status`, `/log`
-- Periodic version check (default every 6h) for **both** podkop and the
-  updater; a new release delivers a fresh notification message
-- Optional **auto-update**: when enabled, new podkop releases install
-  automatically instead of only notifying (the updater itself stays
-  notify-only)
+- **Dashboard menu**: a single tracked message shows a status card (podkop &
+  updater versions, DNS, active transport tier, last check) with buttons to
+  refresh, restart podkop, and open the Backups / Settings submenus.
+  Contextual "⬆️ Обновить" rows appear when an update is available.
+- Slash commands also work: `/menu`, `/check_podkop`, `/check_self`,
+  `/check_dns`, `/restart`, `/status`, `/log`
+- **Periodic version check** (default every 6h) for **both** podkop and the
+  updater; a new release delivers a fresh notification.
+- **Version rollback / downgrade**: roll podkop back to any supported release
+  (≥ 0.7.0) — installed straight from that release's package assets. Versions
+  with a saved config backup are offered first; a one-tap rollback is also
+  offered automatically if an update leaves DNS unhealthy.
+- **Config backup / restore** (📦 Бэкапы): versioned, timestamped snapshots of
+  `/etc/config/podkop` — create, restore (version → timestamp), delete, with
+  automatic retention. A downgrade auto-restores the target version's config.
+- **Settings menu** (⚙️ Настройки), applied live without a restart: toggle
+  podkop auto-update and updater auto-update separately, change the check
+  interval, set backup retention, force an emergency-IP refresh, edit the
+  router label and admin allowlist, or dump the current config (token masked).
 - **Access control**: restrict commands to specific Telegram user IDs;
   a **concurrency guard** prevents a double-click from launching two
-  `install.sh` runs as root at once
+  `install.sh` runs as root at once.
 - **Supply-chain hardening**: podkop's `install.sh` is fetched pinned to
   the detected release tag (not branch HEAD); self-update verifies the
-  binary against a published `.sha256`
-- Tiered HTTP transport: Podkop SOCKS5 → direct → emergency Telegram IPs,
-  with a sticky last-known-good tier that periodically resets to prefer
-  the primary path again
-- Emergency IPs refreshed daily via DoH (concurrent queries) using
-  podkop's configured DNS server; persisted in UCI so they survive reboots
-- Atomic self-update with `.bak` rollback file; procd respawns into the
-  new binary
-- DNS health check after every restart/update polls
-  `fakeip.podkop.fyi` until it resolves into podkop's fakeip range; a
-  post-update failure is surfaced prominently
+  binary against a published `.sha256`.
+- **Tiered HTTP transport**: Podkop SOCKS5 → direct → emergency Telegram IPs,
+  with a sticky last-known-good tier that periodically resets to prefer the
+  primary path again. Emergency IPs refreshed daily via DoH (concurrent
+  queries) and persisted in UCI so they survive reboots.
+- **Atomic self-update** with `.bak` rollback; procd respawns into the new
+  binary. A DNS health check after every restart/update/rollback polls
+  `fakeip.podkop.fyi`; a failure to recover is surfaced prominently.
 
 ## Requirements
 - OpenWrt or ImmortalWrt router (supported archs: amd64, arm64, armv7,
@@ -67,27 +72,28 @@ uci set podkop_updater.settings.chat_id="YOUR_CHAT_ID"
 uci set podkop_updater.settings.check_interval=6   # hours
 uci set podkop_updater.settings.router_label="Home"  # optional: shown in message header
 uci set podkop_updater.settings.admin_ids="123456789 987654321"  # optional: allowed user IDs
-uci set podkop_updater.settings.auto_update=1   # optional: auto-install podkop releases
+uci set podkop_updater.settings.auto_update=1        # optional: auto-install podkop releases
+uci set podkop_updater.settings.auto_update_self=1   # optional: auto-install updater releases
+uci set podkop_updater.settings.backup_keep=10       # optional: keep N config backups (0 = unlimited)
 uci commit podkop_updater
 ```
 
-`router_label` is optional. Set it to disambiguate routers when several
-daemons (each with its own bot) post into the same chat or supergroup
-topic; the label is prepended in bold to every menu message. When empty,
-the daemon falls back to the system hostname.
+Most of these are also editable at runtime from the **⚙️ Настройки** menu in
+chat (changes are written back to UCI and applied live). `bot_token` and
+`chat_id` are set only here or via the installer.
 
-`admin_ids` is an optional space-separated allowlist of Telegram user IDs.
-When set, only those users may issue commands (every callback and slash
-command is gated by `From.ID`); others get an "access denied" alert. When
-empty, anyone in the configured chat may issue commands.
+| key | meaning |
+|-----|---------|
+| `router_label` | Name shown bold in every message header; disambiguates multiple routers in one chat. Empty = system hostname. |
+| `admin_ids` | Space-separated allowlist of Telegram user IDs. When set, only they may issue commands (gated by `From.ID`); others get "access denied". Empty = anyone in the chat. |
+| `auto_update` | `1` = periodic check auto-installs new **podkop** releases instead of only notifying. |
+| `auto_update_self` | `1` = periodic check auto-installs new **updater** releases too (sha256-verified). Off by default so a bad self-release can't silently brick the bot. |
+| `backup_keep` | How many config backups to retain; oldest pruned first. `0` = unlimited. |
 
-`auto_update` (`1`/`true`) makes the periodic check install new podkop
-releases automatically instead of only notifying. The updater never
-auto-updates itself, so a bad self-release can't silently brick the bot.
-
-The daemon also writes the discovered emergency IP list back to
-`podkop_updater.settings.emergency_ips` (space-separated) and tracks its
-menu message id in `podkop_updater.settings.menu_mid`.
+The daemon also writes the discovered emergency IP list to
+`emergency_ips` and tracks its menu message id in `menu_mid`. Config backups
+are stored next to the live config as `/etc/config/podkop.bak-<version>-<timestamp>`
+(the dotted name keeps UCI from loading them).
 
 ## Service
 
