@@ -20,19 +20,16 @@
 - 3-уровневый транспорт: podkop SOCKS5 → прямой → аварийные IP Telegram (DoH, sticky)
 - Проверка DNS после каждого restart / update / отката
 
-## Требования
-OpenWrt/ImmortalWrt (amd64, arm64, armv7, mipsle/mips softfloat). Токен бота
-([@BotFather](https://t.me/BotFather)) и chat id ([@get_id_bot](https://t.me/get_id_bot)).
-
 ## Установка
 ```sh
 sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
 ```
-Определяет архитектуру, ставит procd-сервис, спрашивает токен + chat id.
+Определяет архитектуру, ставит procd-сервис, спрашивает токен бота
+([@BotFather](https://t.me/BotFather)) и chat id ([@get_id_bot](https://t.me/get_id_bot)).
 Если на роутере есть свой `/usr/bin/podkop_bot` — отключите его. Два демона
 на один токен воруют друг у друга обновления.
 
-## Конфигурация (UCI `/etc/config/podkop_updater`)
+## Настройки (UCI `/etc/config/podkop_updater`)
 
 | ключ | значение |
 |------|----------|
@@ -46,21 +43,7 @@ sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater
 | `backup_keep` | сколько бэкапов конфига хранить (0 = без лимита) |
 
 Всё кроме `bot_token`/`chat_id` правится на лету из меню ⚙️ (пишется обратно
-в UCI). Демон также ведёт `emergency_ips` и `menu_mid`. Бэкапы конфига:
-`/etc/config/podkop.bak-<версия>-<дата-время>`. Лог: `/tmp/podkop_update.log`.
-
-## Сервис
-```sh
-/etc/init.d/podkop_updater {start|stop|restart}
-```
-
-## Сборка
-```sh
-cd go
-make build       # хост
-make build-all   # 5 архитектур OpenWrt
-```
-Детали архитектуры: [`go/DESIGN.md`](./go/DESIGN.md).
+в UCI). Демон также ведёт `emergency_ips` и `menu_mid`.
 
 ## Лицензия
 [MIT](https://opensource.org/licenses/MIT)

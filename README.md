@@ -20,19 +20,16 @@ update / rollback / restart / config-backup from a Telegram dashboard.
 - Tiered transport: podkop SOCKS5 → direct → emergency Telegram IPs (DoH-refreshed, sticky)
 - DNS health check after every restart / update / rollback
 
-## Requirements
-OpenWrt/ImmortalWrt (amd64, arm64, armv7, mipsle/mips softfloat). Bot token
-([@BotFather](https://t.me/BotFather)) and chat id ([@get_id_bot](https://t.me/get_id_bot)).
-
 ## Install
 ```sh
 sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
 ```
-Detects the arch, installs the procd service, prompts for token + chat id.
+Detects the arch, installs the procd service, prompts for a bot token
+([@BotFather](https://t.me/BotFather)) and chat id ([@get_id_bot](https://t.me/get_id_bot)).
 If podkop ships its own `/usr/bin/podkop_bot`, disable it first. Two daemons
 on one token steal each other's updates.
 
-## Config (UCI `/etc/config/podkop_updater`)
+## Settings (UCI `/etc/config/podkop_updater`)
 
 | key | meaning |
 |-----|---------|
@@ -47,21 +44,6 @@ on one token steal each other's updates.
 
 Everything except `bot_token`/`chat_id` is editable live from the ⚙️ menu
 (written back to UCI). The daemon also manages `emergency_ips` and `menu_mid`.
-Config backups live at `/etc/config/podkop.bak-<version>-<timestamp>`.
-Log: `/tmp/podkop_update.log`.
-
-## Service
-```sh
-/etc/init.d/podkop_updater {start|stop|restart}
-```
-
-## Build
-```sh
-cd go
-make build       # host
-make build-all   # 5 OpenWrt arches
-```
-Architecture notes: [`go/DESIGN.md`](./go/DESIGN.md).
 
 ## License
 [MIT](https://opensource.org/licenses/MIT)
