@@ -17,16 +17,17 @@ binary managed by procd.
 - **Periodic version check** (default every 6h) for **both** podkop and the
   updater; a new release delivers a fresh notification.
 - **Version rollback / downgrade**: roll podkop back to any supported release
-  (≥ 0.7.0) — installed straight from that release's package assets. Versions
-  with a saved config backup are offered first; a one-tap rollback is also
-  offered automatically if an update leaves DNS unhealthy.
+  (0.7.0 or newer), installed straight from that release's package assets.
+  Versions with a saved config backup are listed first. If an update leaves
+  DNS broken, the bot also offers a one-tap rollback right there.
 - **Config backup / restore** (📦 Бэкапы): versioned, timestamped snapshots of
-  `/etc/config/podkop` — create, restore (version → timestamp), delete, with
-  automatic retention. A downgrade auto-restores the target version's config.
-- **Settings menu** (⚙️ Настройки), applied live without a restart: toggle
-  podkop auto-update and updater auto-update separately, change the check
-  interval, set backup retention, force an emergency-IP refresh, edit the
-  router label and admin allowlist, or dump the current config (token masked).
+  `/etc/config/podkop`. You can create one, restore by version then timestamp,
+  or delete old ones, and the daemon prunes them to a retention limit. A
+  downgrade restores the target version's config automatically.
+- **Settings menu** (⚙️ Настройки), applied live without a restart. Toggle
+  podkop and updater auto-update separately, change the check interval, set
+  the backup retention limit, force an emergency-IP refresh, edit the router
+  label or admin list, or dump the current config with the token masked.
 - **Access control**: restrict commands to specific Telegram user IDs;
   a **concurrency guard** prevents a double-click from launching two
   `install.sh` runs as root at once.
