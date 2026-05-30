@@ -93,6 +93,19 @@ func (t *TieredTransport) RebuildEmergency(ips []string) {
 	logger.Logf("Transport: rebuilt emergency tiers: %v", ips)
 }
 
+// ResetSticky moves the sticky index back to tier 0 so the next request
+// prefers the cheapest tier (SOCKS5/direct) again. Called periodically so a
+// transient outage that pushed us onto an emergency-IP tier does not pin us
+// there after the primary path recovers. No-op if already at 0.
+func (t *TieredTransport) ResetSticky() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.idx != 0 {
+		logger.Logf("Transport: resetting sticky tier %s → %s", t.tiers[t.idx].name, t.tiers[0].name)
+		t.idx = 0
+	}
+}
+
 // Tiers returns the configured tier names, in cascade order.
 func (t *TieredTransport) Tiers() []string {
 	t.mu.Lock()

@@ -68,11 +68,19 @@ jobs:
           fi
           ls -lh dist/
 
+      - name: Checksum (post-UPX, the distributed artifact)
+        working-directory: go/dist
+        run: |
+          sha256sum podkop_updater-${{ matrix.target }} > podkop_updater-${{ matrix.target }}.sha256
+          cat podkop_updater-${{ matrix.target }}.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: podkop_updater-${{ matrix.target }}
-          path: go/dist/podkop_updater-${{ matrix.target }}
+          path: |
+            go/dist/podkop_updater-${{ matrix.target }}
+            go/dist/podkop_updater-${{ matrix.target }}.sha256
 
   release:
     name: Publish release

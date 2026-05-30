@@ -46,9 +46,10 @@ var defaultEmergencyIPs = []string{
 }
 
 const (
-	telegramHost      = "api.telegram.org"
-	ipRefreshInterval = 24 * time.Hour
-	ipRefreshInitial  = 30 * time.Second
+	telegramHost        = "api.telegram.org"
+	ipRefreshInterval   = 24 * time.Hour
+	ipRefreshInitial    = 30 * time.Second
+	stickyResetInterval = 10 * time.Minute
 )
 
 func main() {
@@ -81,6 +82,7 @@ Usage:
 }
 
 func runDaemon() int {
+	startTime := time.Now()
 	if err := logger.Init(logPath, logMaxLines, logKeepLines); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -134,6 +136,7 @@ func runDaemon() int {
 	// fallback queries through the same broken path.
 	dohHC := &http.Client{Timeout: 10 * time.Second}
 	go runEmergencyIPRefresh(ctx, dohHC, tt)
+	go runStickyReset(ctx, tt)
 
 	label := cfg.RouterLabel
 	if label == "" {
@@ -148,6 +151,11 @@ func runDaemon() int {
 		CheckInterval:  cfg.CheckInterval,
 		Runner:         runner,
 		DNSConfig:      dnsCfg,
+		AdminIDs:       cfg.AdminIDs,
+		AutoUpdate:     cfg.AutoUpdate,
+		Tiers:          tt,
+		LogPath:        logPath,
+		StartTime:      startTime,
 		InitialMenuMID: cfg.MenuMID,
 		PersistMenuMID: persistMenuMID,
 	})
@@ -216,6 +224,22 @@ func runEmergencyIPRefresh(ctx context.Context, hc *http.Client, tt *transport.T
 		}
 		refreshEmergencyIPsOnce(ctx, hc, tt)
 		timer.Reset(ipRefreshInterval)
+	}
+}
+
+// runStickyReset periodically nudges the transport's sticky tier back to the
+// cheapest one, so a transient outage that pushed traffic onto an emergency-IP
+// tier does not pin us there after the primary path recovers.
+func runStickyReset(ctx context.Context, tt *transport.TieredTransport) {
+	tick := time.NewTicker(stickyResetInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			tt.ResetSticky()
+		}
 	}
 }
 

@@ -68,22 +68,42 @@ func (r *Runner) RunRestart(ctx context.Context) (string, error) {
 	return "Podkop перезапущен\n" + status, nil
 }
 
-// RunUpdate downloads and runs the upstream podkop install.sh, then polls
-// the DNS check.
-func (r *Runner) RunUpdate(ctx context.Context, target string) (string, error) {
-	logger.Logf("Starting update to %s", target)
+// RunUpdate downloads and runs the upstream podkop install.sh (pinned to tag
+// when non-empty), then polls the DNS check and verifies the installed
+// version actually advanced to target.
+func (r *Runner) RunUpdate(ctx context.Context, target, tag string) (string, error) {
+	before := updater.InstalledVersion()
+	logger.Logf("Starting update %s → %s (tag %q)", before, target, tag)
 	out, closeOut := openLogAppend(r.logPath)
 	if closeOut != nil {
 		defer closeOut()
 	}
-	if err := updater.RunInstallScript(ctx, r.hc, out); err != nil {
+	if err := updater.RunInstallScript(ctx, r.hc, out, tag); err != nil {
 		logger.Errf("install.sh: %v", err)
 		return "Ошибка запуска install.sh: " + err.Error(), err
 	}
 	logger.Logf("install.sh completed, polling DNS")
 	status, _ := dnsCheck(ctx, r.dns)
 	logger.Logf("%s", status)
-	return "Обновлено до " + target + "\n" + status, nil
+
+	after := updater.InstalledVersion()
+	msg := "Обновлено до " + after + "\n" + status
+	if updater.Normalize(after) != updater.Normalize(target) {
+		logger.Errf("post-update version mismatch: target=%s installed=%s", target, after)
+		msg = "⚠️ Установлена версия " + after + " (ожидалась " + target + ")\n" + status
+	}
+	if !dnsHealthy(status) {
+		logger.Errf("post-update DNS check did not recover (was %s before)", before)
+		msg = "⚠️ podkop обновлён, но DNS не поднялся\n" + status +
+			"\nПроверьте конфиг; при поломке откат: установить прошлую версию " + before
+	}
+	return msg, nil
+}
+
+// dnsHealthy reports whether a dnsCheck status string indicates the fakeip
+// resolver came back up (vs a timeout/cancel).
+func dnsHealthy(status string) bool {
+	return strings.HasPrefix(status, "DNS OK")
 }
 
 // RunSelfUpdate downloads the latest podkop_updater binary, swaps it in

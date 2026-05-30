@@ -1,6 +1,9 @@
 package telegram
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // botState owns the mutable per-session fields that the periodic checker,
 // callback handlers, and UI mutators race against. The mutex is unexported
@@ -10,10 +13,17 @@ type botState struct {
 
 	installedVer        string
 	latestVer           string
+	latestTag           string // raw upstream tag for the latest podkop release
 	updateAvailable     bool
 	selfLatest          string
 	selfUpdateAvailable bool
 	menuMID             int
+	lastCheck           time.Time // wall-clock of the most recent successful podkop refresh
+
+	// busy guards long-running side effects (restart/update/self-update) so a
+	// double-click or an overlapping auto-update can't run two install.sh
+	// invocations as root concurrently.
+	busy bool
 
 	// persistMID is invoked outside the mutex whenever menuMID changes to
 	// a new value, so the next daemon start can edit the same message
@@ -66,6 +76,41 @@ func (s *botState) latest() string {
 	return s.latestVer
 }
 
+// latestAndTag returns the cached latest podkop version and its raw upstream
+// tag, used to pin the install.sh download.
+func (s *botState) latestAndTag() (version, tag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latestVer, s.latestTag
+}
+
+// lastCheckTime returns the wall-clock of the most recent successful refresh
+// (zero if none yet).
+func (s *botState) lastCheckTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastCheck
+}
+
+// tryBusy atomically marks the state busy, returning false if it was already
+// busy. The caller must call clearBusy when done iff this returned true.
+func (s *botState) tryBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy {
+		return false
+	}
+	s.busy = true
+	return true
+}
+
+// clearBusy releases the busy guard.
+func (s *botState) clearBusy() {
+	s.mu.Lock()
+	s.busy = false
+	s.mu.Unlock()
+}
+
 // updateReady reports whether a podkop update is currently advertised.
 func (s *botState) updateReady() bool {
 	s.mu.Lock()
@@ -74,12 +119,14 @@ func (s *botState) updateReady() bool {
 }
 
 // setPodkopFetch records a successful podkop refresh result.
-func (s *botState) setPodkopFetch(installed, latest string, available bool) {
+func (s *botState) setPodkopFetch(installed, latest, tag string, available bool, when time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.installedVer = installed
 	s.latestVer = latest
+	s.latestTag = tag
 	s.updateAvailable = available
+	s.lastCheck = when
 }
 
 // setPodkopFetchError records a failed podkop refresh: keep the installed

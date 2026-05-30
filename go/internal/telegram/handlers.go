@@ -21,6 +21,8 @@ func (t *Bot) registerHandlers() {
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_restart", bot.MatchTypeExact, t.onRestart)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_update_podkop", bot.MatchTypeExact, t.onUpdatePodkop)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_update_self", bot.MatchTypeExact, t.onUpdateSelf)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_status", bot.MatchTypeExact, t.onStatus)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_log", bot.MatchTypeExact, t.onLog)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_ok", bot.MatchTypeExact, t.onOK)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, t.onStartOrMenu)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/menu", bot.MatchTypeExact, t.onStartOrMenu)
@@ -28,6 +30,30 @@ func (t *Bot) registerHandlers() {
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/check_self", bot.MatchTypeExact, t.onTextCheckSelf)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/check_dns", bot.MatchTypeExact, t.onTextCheckDNS)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/restart", bot.MatchTypeExact, t.onTextRestart)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypeExact, t.onTextStatus)
+	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/log", bot.MatchTypeExact, t.onTextLog)
+}
+
+// allowedUser reports whether userID may issue commands. An empty admin set
+// means anyone in the configured chat is allowed (backward-compatible).
+func (t *Bot) allowedUser(userID int64) bool {
+	if len(t.adminIDs) == 0 {
+		return true
+	}
+	return t.adminIDs[userID]
+}
+
+// answerAlert acks a callback with a popup alert (used for access-denied and
+// busy notices). Best-effort.
+func (t *Bot) answerAlert(ctx context.Context, cb *models.CallbackQuery, text string) {
+	if cb == nil {
+		return
+	}
+	_, _ = t.b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: cb.ID,
+		Text:            text,
+		ShowAlert:       true,
+	})
 }
 
 // startTextCommand is the entry guard shared by every slash-command handler:
@@ -36,6 +62,10 @@ func (t *Bot) registerHandlers() {
 // the menu the user was looking at.
 func (t *Bot) startTextCommand(update *models.Update, name string) bool {
 	if update.Message == nil || update.Message.Chat.ID != t.chatID {
+		return false
+	}
+	if update.Message.From != nil && !t.allowedUser(update.Message.From.ID) {
+		logger.Logf("Text command %s denied for user %d", name, update.Message.From.ID)
 		return false
 	}
 	logger.Logf("Text command: %s", name)
@@ -64,13 +94,44 @@ func (t *Bot) fromAllowedChat(cb *models.CallbackQuery) bool {
 // Returns false when the callback originated outside the configured chat —
 // callers must early-return in that case.
 func (t *Bot) handleCallback(ctx context.Context, update *models.Update, cmdName string) bool {
-	if !t.fromAllowedChat(update.CallbackQuery) {
+	cb := update.CallbackQuery
+	if !t.fromAllowedChat(cb) {
 		return false
 	}
-	t.answer(ctx, update.CallbackQuery)
-	t.adoptClickedMessage(ctx, update.CallbackQuery)
+	if !t.allowedUser(cb.From.ID) {
+		logger.Logf("Callback %s denied for user %d", cmdName, cb.From.ID)
+		t.answerAlert(ctx, cb, "Нет доступа")
+		return false
+	}
+	t.answer(ctx, cb)
+	t.adoptClickedMessage(ctx, cb)
 	logger.Logf("Callback: %s", cmdName)
 	return true
+}
+
+// beginHeavy is handleCallback plus a concurrency guard for the destructive,
+// long-running actions (restart/update/self-update). It returns a release
+// func and true when the caller owns the busy lock; the caller must
+// `defer release()`. On denial/busy it answers the user and returns false.
+func (t *Bot) beginHeavy(ctx context.Context, update *models.Update, cmdName string) (func(), bool) {
+	cb := update.CallbackQuery
+	if !t.fromAllowedChat(cb) {
+		return nil, false
+	}
+	if !t.allowedUser(cb.From.ID) {
+		logger.Logf("Callback %s denied for user %d", cmdName, cb.From.ID)
+		t.answerAlert(ctx, cb, "Нет доступа")
+		return nil, false
+	}
+	if !t.state.tryBusy() {
+		logger.Logf("Callback %s rejected: busy", cmdName)
+		t.answerAlert(ctx, cb, "Занято, дождитесь завершения текущей операции")
+		return nil, false
+	}
+	t.answer(ctx, cb)
+	t.adoptClickedMessage(ctx, cb)
+	logger.Logf("Callback: %s", cmdName)
+	return t.state.clearBusy, true
 }
 
 // adoptClickedMessage makes the message the user just clicked on the
@@ -271,9 +332,11 @@ func (t *Bot) doRestart(ctx context.Context) {
 
 // onRestart: перезагрузка podkop (callback).
 func (t *Bot) onRestart(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_restart") {
+	release, ok := t.beginHeavy(ctx, update, "cmd_restart")
+	if !ok {
 		return
 	}
+	defer release()
 	t.doRestart(ctx)
 }
 
@@ -282,16 +345,29 @@ func (t *Bot) onTextRestart(ctx context.Context, _ *bot.Bot, update *models.Upda
 	if !t.startTextCommand(update, "/restart") {
 		return
 	}
+	if !t.state.tryBusy() {
+		logger.Logf("/restart rejected: busy")
+		t.sendText(ctx, "Занято, дождитесь завершения текущей операции")
+		return
+	}
+	defer t.state.clearBusy()
 	t.doRestart(ctx)
 }
 
 // onUpdatePodkop: запуск обновления podkop.
 func (t *Bot) onUpdatePodkop(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_update_podkop") {
+	release, ok := t.beginHeavy(ctx, update, "cmd_update_podkop")
+	if !ok {
 		return
 	}
+	defer release()
+	t.performPodkopUpdate(ctx)
+}
 
-	target := t.state.latest()
+// performPodkopUpdate runs the podkop update flow against the cached target
+// version/tag and renders the result. The caller owns the busy guard.
+func (t *Bot) performPodkopUpdate(ctx context.Context) {
+	target, tag := t.state.latestAndTag()
 	if target == "" {
 		t.editResult(ctx, "Нет данных о новой версии podkop")
 		return
@@ -302,7 +378,7 @@ func (t *Bot) onUpdatePodkop(ctx context.Context, _ *bot.Bot, update *models.Upd
 		t.editResult(ctx, "Готово\n[stub] Обновление пока не реализовано (phase 3)")
 		return
 	}
-	status, err := t.runner.RunUpdate(ctx, target)
+	status, err := t.runner.RunUpdate(ctx, target, tag)
 	if err != nil {
 		logger.Errf("update: %v", err)
 		t.editResult(ctx, "Ошибка обновления\n"+status)
@@ -314,9 +390,11 @@ func (t *Bot) onUpdatePodkop(ctx context.Context, _ *bot.Bot, update *models.Upd
 
 // onUpdateSelf: запуск self-update.
 func (t *Bot) onUpdateSelf(ctx context.Context, _ *bot.Bot, update *models.Update) {
-	if !t.handleCallback(ctx, update, "cmd_update_self") {
+	release, ok := t.beginHeavy(ctx, update, "cmd_update_self")
+	if !ok {
 		return
 	}
+	defer release()
 
 	t.editBusy(ctx, "Обновление updater...")
 
@@ -359,7 +437,7 @@ func (t *Bot) onStartOrMenu(ctx context.Context, _ *bot.Bot, update *models.Upda
 // Errors are logged; on failure latestVer is cleared so the UI shows
 // an explicit "error" state instead of misleading data.
 func (t *Bot) refreshPodkop(ctx context.Context) {
-	latest, err := updater.LatestRelease(ctx, t.hc)
+	latest, tag, err := updater.LatestReleaseFull(ctx, t.hc)
 	installed := updater.InstalledVersion()
 	if err != nil {
 		logger.Errf("github podkop fetch: %v", err)
@@ -367,8 +445,8 @@ func (t *Bot) refreshPodkop(ctx context.Context) {
 		return
 	}
 	available := updater.IsNewer(installed, latest)
-	t.state.setPodkopFetch(installed, latest, available)
-	logger.Logf("podkop check: installed=%s latest=%s update=%v", installed, latest, available)
+	t.state.setPodkopFetch(installed, latest, tag, available, time.Now())
+	logger.Logf("podkop check: installed=%s latest=%s tag=%s update=%v", installed, latest, tag, available)
 }
 
 // refreshSelf fetches latest podkop_autoupdater release and compares with

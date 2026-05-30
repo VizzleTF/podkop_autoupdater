@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"sync"
+
+	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
 )
 
 // telegramCIDRs covers AS62041 (Telegram Messenger Inc) IPv4 prefixes.
@@ -79,17 +82,40 @@ func Discover(ctx context.Context, hc *http.Client, host string, endpoints []str
 	if len(endpoints) == 0 {
 		endpoints = DefaultDoHEndpoints
 	}
+	// Query endpoints concurrently: a single slow/blocked resolver should not
+	// serialize behind the others (worst case was len(endpoints) × timeout).
+	type result struct {
+		ips []string
+		err error
+		ep  string
+	}
+	results := make([]result, len(endpoints))
+	var wg sync.WaitGroup
+	for i, ep := range endpoints {
+		wg.Add(1)
+		go func(i int, ep string) {
+			defer wg.Done()
+			ips, err := queryDoH(ctx, hc, ep, host)
+			results[i] = result{ips: ips, err: err, ep: ep}
+		}(i, ep)
+	}
+	wg.Wait()
+
 	found := make(map[string]struct{})
 	var lastErr error
-	for _, ep := range endpoints {
-		ips, err := queryDoH(ctx, hc, ep, host)
-		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", ep, err)
+	for _, r := range results {
+		if r.err != nil {
+			lastErr = fmt.Errorf("%s: %w", r.ep, r.err)
 			continue
 		}
-		for _, ip := range ips {
+		for _, ip := range r.ips {
 			if InTelegramRange(ip) {
 				found[ip] = struct{}{}
+			} else {
+				// IP outside every known Telegram CIDR: either a poisoned
+				// answer or Telegram shifting prefixes. Surface it so the
+				// hardcoded CIDR list can be revisited before it goes stale.
+				logger.Logf("DoH discovery: %s returned %s outside known Telegram ranges (ignored)", r.ep, ip)
 			}
 		}
 	}

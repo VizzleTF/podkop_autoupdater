@@ -36,13 +36,13 @@ Release: push an annotated `v*` tag from `main`. The workflow builds the five-ar
 `main` constructs everything: loads UCI config → opens log + PID lock → picks SOCKS5 endpoint via `service.DetectSocksAddr` → builds the tiered transport → creates an `http.Client` for Telegram (timeout = long-poll window + 15s) and a separate one for updates (5min, install.sh fetches can outlast long-poll) → starts `runEmergencyIPRefresh` goroutine → boots the Telegram bot. PID lockfile at `/tmp/podkop_updater.pid`; signal 0 used to verify the recorded PID is alive before refusing to start.
 
 ### Three-tier HTTP transport (`go/internal/transport/`)
-`TieredTransport.RoundTrip` snapshots tiers under a mutex and walks starting from a sticky index; first success updates sticky. Tiers in order:
+`TieredTransport.RoundTrip` snapshots tiers under a mutex and walks starting from a sticky index; first success updates sticky. A `runStickyReset` goroutine in `main.go` calls `ResetSticky` every 10min to drop the sticky index back to tier 0, so a transient outage that pushed traffic onto an emergency-IP tier doesn't pin it there after SOCKS5/direct recovers. Tiers in order:
 
 1. SOCKS5 to podkop's mixed inbound (only added if `service.DetectSocksAddr` finds one in the live sing-box config).
 2. Direct.
 3. Emergency tiers — one per discovered Telegram IP. Each pins `api.telegram.org` to a specific IP (DNS override scoped to that host, SNI preserved so TLS still validates).
 
-`discovery.go` queries DoH (endpoint pulled from podkop's UCI; falls back to `transport.DefaultDoHEndpoints`) for current `api.telegram.org` A records, filters to known Telegram CIDRs. Refresh schedule: initial run 30s after startup, then every 24h. Discovered IPs are merged with the compiled `defaultEmergencyIPs` in `main.go` so a thin DoH reply never shrinks coverage. Merged set is persisted to UCI (`emergency_ips`) so reboots start with the last known list.
+`discovery.go` queries DoH (endpoint pulled from podkop's UCI; falls back to `transport.DefaultDoHEndpoints`) for current `api.telegram.org` A records **concurrently** (one goroutine per endpoint, so a blocked resolver can't serialize the rest), filters to known Telegram CIDRs, and logs any answer that falls outside every known CIDR (early signal the hardcoded list is drifting). Refresh schedule: initial run 30s after startup, then every 24h. Discovered IPs are merged with the compiled `defaultEmergencyIPs` in `main.go` so a thin DoH reply never shrinks coverage. Merged set is persisted to UCI (`emergency_ips`) so reboots start with the last known list.
 
 ### Telegram state machine (`go/internal/telegram/`)
 Built on `github.com/go-telegram/bot`. The bot owns exactly one tracked menu message at a time, cycling through states:
@@ -61,10 +61,15 @@ Periodic auto-detection of a new podkop release **deletes** the current tracked 
 4. On next start, `CleanupBackup` removes the `.bak`. Manual rollback if procd's respawn budget is exhausted: `mv podkop_updater.bak podkop_updater`.
 
 ### podkop update path (`go/internal/updater/`)
-`InstalledVersion` reads from `opkg` or `apk`. `PODKOP_FAKE_INSTALLED` env var overrides it (normalized through `Normalize` first) — use this for local end-to-end testing without downgrading the real package. `install.sh` runner pipes `"y\ny\n"` into the upstream installer to bypass interactive prompts.
+`InstalledVersion` reads from `opkg` or `apk`. `PODKOP_FAKE_INSTALLED` env var overrides it (normalized through `Normalize` first) — use this for local end-to-end testing without downgrading the real package. `install.sh` runner pipes `"y\ny\n"` into the upstream installer to bypass interactive prompts. The script is fetched **pinned to the detected release tag** (`refs/tags/<tag>/install.sh`), not branch HEAD, so an accidental/compromised commit to podkop's `main` is not executed as root; it falls back to `main` only if the tag has no `install.sh`. After install, `RunUpdate` re-reads the installed version and flags a mismatch with the target, and warns prominently if the post-update DNS check didn't recover (no true downgrade — install.sh only moves forward).
+
+GitHub release lookups (`github.go`) carry an in-memory ETag cache: a `304 Not Modified` short-circuits to the last decoded version, keeping frequent checks under the 60 req/h unauthenticated rate limit. `LatestReleaseFull` also returns the raw tag used for the pinned install.sh.
 
 ### DNS health check (`go/internal/service/`)
 After every restart/update, polls `fakeip.podkop.fyi` via `127.0.0.42` every 2s up to a 60s budget, waiting for the response to land in podkop's fakeip CIDR. This is the signal that podkop's stack came back up cleanly.
+
+### Access control & concurrency (`go/internal/telegram/`)
+`admin_ids` (UCI) gates every command by `From.ID`; empty = anyone in the configured chat (backward-compatible). Denied callbacks get a "Нет доступа" alert. The destructive long-running actions (restart / update podkop / self-update) run under a single `botState.busy` guard (`tryBusy`/`clearBusy`) so a double-click or an overlapping auto-update cannot launch two `install.sh` runs as root at once; a rejected click answers "Занято". `/status` and `/log` are read-only and use `allowTextCmd` (no menu reset). Self-update verifies a `<asset>.sha256` published alongside the binary (best-effort: a 404 is tolerated with a warning, a mismatch is fatal).
 
 ## Persistence (UCI: `/etc/config/podkop_updater`, section `settings`)
 
@@ -74,6 +79,8 @@ After every restart/update, polls `fakeip.podkop.fyi` via `127.0.0.42` every 2s 
 | `chat_id`       | int    | Telegram chat ID (required)                                 |
 | `check_interval`| int    | Hours between podkop version checks (default 6)             |
 | `router_label`  | string | Optional human-readable router name; prefixed in bold to every menu message via `Bot.withLabel`. Empty = fall back to hostname. Useful when multiple routers post into one shared chat. |
+| `admin_ids`     | string | Space-separated Telegram user IDs allowed to issue commands. Empty = anyone in the chat (backward-compatible). Gated by `From.ID` on every callback and slash command. |
+| `auto_update`   | bool   | `1`/`true` = periodic check auto-installs new podkop releases (still notify-only for the updater itself). Default off. |
 | `emergency_ips` | string | Space-separated; written by the daemon, read on next start  |
 | `menu_mid`      | int    | Tracked Telegram menu message ID; written on every transition |
 

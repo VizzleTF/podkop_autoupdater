@@ -88,6 +88,10 @@ else
     [ -z "$INTERVAL" ] && INTERVAL=6
     echo "Router label shown in chat (e.g. 'Home', 'Dacha'; leave empty to use hostname):"
     read -r ROUTER_LABEL
+    echo "Admin Telegram user IDs allowed to issue commands (space-separated; empty = anyone in the chat):"
+    read -r ADMIN_IDS
+    echo "Auto-install new podkop releases without confirmation? (y/N):"
+    read -r AUTO_UPDATE_ANS
 
     [ -f "/etc/config/${UCI_PKG}" ] || touch "/etc/config/${UCI_PKG}"
     uci -q delete "${UCI_PKG}.${UCI_SEC}" 2>/dev/null || true
@@ -96,6 +100,10 @@ else
     uci set "${UCI_PKG}.${UCI_SEC}.chat_id=${CHAT}"
     uci set "${UCI_PKG}.${UCI_SEC}.check_interval=${INTERVAL}"
     [ -n "$ROUTER_LABEL" ] && uci set "${UCI_PKG}.${UCI_SEC}.router_label=${ROUTER_LABEL}"
+    [ -n "$ADMIN_IDS" ] && uci set "${UCI_PKG}.${UCI_SEC}.admin_ids=${ADMIN_IDS}"
+    case "$AUTO_UPDATE_ANS" in
+        [yY]*) uci set "${UCI_PKG}.${UCI_SEC}.auto_update=1" ;;
+    esac
     uci commit "${UCI_PKG}"
     step "UCI saved to /etc/config/${UCI_PKG}"
 fi

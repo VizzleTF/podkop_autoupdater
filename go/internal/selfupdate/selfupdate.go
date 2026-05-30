@@ -5,11 +5,14 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/logger"
 )
@@ -74,7 +77,8 @@ func Run(ctx context.Context, hc *http.Client, currentExePath string) error {
 	if err != nil {
 		return fmt.Errorf("open tmp: %w", err)
 	}
-	n, copyErr := io.Copy(out, resp.Body)
+	hasher := sha256.New()
+	n, copyErr := io.Copy(out, io.TeeReader(resp.Body, hasher))
 	closeErr := out.Close()
 	if copyErr != nil {
 		os.Remove(tmpPath)
@@ -87,6 +91,11 @@ func Run(ctx context.Context, hc *http.Client, currentExePath string) error {
 	if n < minBinSize {
 		os.Remove(tmpPath)
 		return fmt.Errorf("download too small: %d bytes", n)
+	}
+	gotSum := hex.EncodeToString(hasher.Sum(nil))
+	if err := verifyChecksum(ctx, hc, url, gotSum); err != nil {
+		os.Remove(tmpPath)
+		return err
 	}
 	logger.Logf("Self-update: downloaded %d bytes to %s", n, tmpPath)
 
@@ -104,6 +113,49 @@ func Run(ctx context.Context, hc *http.Client, currentExePath string) error {
 		return fmt.Errorf("install new: %w", err)
 	}
 	logger.Logf("Self-update: binary swapped (backup at %s)", bakPath)
+	return nil
+}
+
+// verifyChecksum fetches "<url>.sha256" and compares it against gotSum. The
+// expected file contains a hex digest, optionally followed by whitespace and
+// a filename (standard sha256sum format). A missing checksum file (404) is
+// tolerated with a warning so self-update keeps working against releases that
+// predate checksum publishing; a present-but-mismatching digest is fatal.
+func verifyChecksum(ctx context.Context, hc *http.Client, binURL, gotSum string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binURL+".sha256", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		logger.Errf("Self-update: checksum fetch failed, proceeding unverified: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		logger.Errf("Self-update: no .sha256 published, proceeding unverified")
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		logger.Errf("Self-update: checksum HTTP %d, proceeding unverified", resp.StatusCode)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("read checksum: %w", err)
+	}
+	want := strings.ToLower(strings.TrimSpace(string(body)))
+	if i := strings.IndexAny(want, " \t"); i > 0 {
+		want = want[:i]
+	}
+	if want == "" {
+		logger.Errf("Self-update: empty checksum file, proceeding unverified")
+		return nil
+	}
+	if want != gotSum {
+		return fmt.Errorf("checksum mismatch: want %s got %s", want, gotSum)
+	}
+	logger.Logf("Self-update: checksum verified (%s)", gotSum)
 	return nil
 }
 

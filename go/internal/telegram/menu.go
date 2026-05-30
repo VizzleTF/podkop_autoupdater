@@ -19,6 +19,10 @@ var (
 			{{Text: "⬆️ Проверить updater", CallbackData: "cmd_check_self"}},
 			{{Text: "🌐 Проверить DNS", CallbackData: "cmd_check_dns"}},
 			{{Text: "🔄 Перезагрузить podkop", CallbackData: "cmd_restart"}},
+			{
+				{Text: "📊 Статус", CallbackData: "cmd_status"},
+				{Text: "📜 Лог", CallbackData: "cmd_log"},
+			},
 		},
 	}
 	kbOK = &models.InlineKeyboardMarkup{
