@@ -20,6 +20,7 @@ func (r *Runner) BackupConfig(version string) (string, error) {
 		return "", err
 	}
 	logger.Logf("Config backed up: %s", path)
+	r.pruneBackups()
 	return path, nil
 }
 
@@ -55,6 +56,8 @@ func (r *Runner) RestoreConfig(ctx context.Context, id string) (string, error) {
 	cur := updater.InstalledVersion()
 	if _, err := r.cfg.Backup(cur, ""); err != nil {
 		logger.Errf("config backup before restore: %v", err)
+	} else {
+		r.pruneBackups()
 	}
 	if err := r.cfg.RestoreID(id); err != nil {
 		logger.Errf("config restore %s: %v", id, err)

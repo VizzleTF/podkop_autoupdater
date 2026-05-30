@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -31,6 +32,7 @@ type UpdateRunner interface {
 	HasConfigBackup(version string) bool
 	RestoreConfig(ctx context.Context, backupID string) (statusText string, err error)
 	DeleteBackup(backupID string) error
+	SetBackupKeep(n int)
 }
 
 // TierReporter exposes the live transport state for the /status command,
@@ -44,37 +46,41 @@ type TierReporter interface {
 // immutable wiring (chat config, HTTP client, runner, compile-time version,
 // DNS probe config); per-session mutable fields live in botState.
 type Bot struct {
-	chatID        int64
-	checkInterval time.Duration
-	label         string
-	selfVer       string
-	runner        UpdateRunner
-	hc            *http.Client
-	dnsCfg        service.DNSConfig
-	adminIDs      map[int64]bool // empty = anyone in the chat may issue commands
-	autoUpdate    bool
-	tiers         TierReporter
-	logPath       string
-	startTime     time.Time
+	chatID     int64
+	selfVer    string
+	runner     UpdateRunner
+	hc         *http.Client
+	dnsCfg     service.DNSConfig
+	tiers      TierReporter
+	logPath    string
+	startTime  time.Time
+	refreshIPs func(context.Context) // forces an emergency-IP DoH refresh (optional)
+
+	set        *botSettings
+	settingsCh chan struct{} // wakes periodicCheck when the interval changes
 
 	b     *bot.Bot
 	state *botState
 }
 
 type Options struct {
-	Token         string
-	ChatID        int64
-	Label         string // identifier shown in message header (hostname or user-set router label)
-	SelfVersion   string // compile-time version of this binary
-	HTTPClient    *http.Client
-	CheckInterval time.Duration
-	Runner        UpdateRunner
-	DNSConfig     service.DNSConfig
-	AdminIDs      []int64      // Telegram user IDs allowed to issue commands; empty = anyone in the chat
-	AutoUpdate    bool         // auto-install new podkop releases on periodic check
-	Tiers         TierReporter // live transport state for /status (optional)
-	LogPath       string       // daemon log path for /log (optional)
-	StartTime     time.Time    // process start, for /status uptime
+	Token          string
+	ChatID         int64
+	Label          string // identifier shown in message header (hostname or user-set router label)
+	SelfVersion    string // compile-time version of this binary
+	HTTPClient     *http.Client
+	CheckInterval  time.Duration
+	Runner         UpdateRunner
+	DNSConfig      service.DNSConfig
+	AdminIDs       []int64               // Telegram user IDs allowed to issue commands; empty = anyone in the chat
+	AutoUpdate     bool                  // auto-install new podkop releases on periodic check
+	AutoUpdateSelf bool                  // auto-install new updater releases on periodic check
+	BackupKeep     int                   // config-backup retention (0 = unlimited)
+	Tiers          TierReporter          // live transport state for /status (optional)
+	LogPath        string                // daemon log path for /log (optional)
+	StartTime      time.Time             // process start, for /status uptime
+	Settings       SettingsStore         // persists runtime settings edits (optional)
+	RefreshIPs     func(context.Context) // forces an emergency-IP DoH refresh (optional)
 
 	// InitialMenuMID is the previously persisted Telegram menu message id
 	// (0 if none). When non-zero, Start edits that message instead of
@@ -100,28 +106,37 @@ func New(opts Options) (*Bot, error) {
 	if opts.CheckInterval == 0 {
 		opts.CheckInterval = 6 * time.Hour
 	}
-	admins := make(map[int64]bool, len(opts.AdminIDs))
-	for _, id := range opts.AdminIDs {
-		admins[id] = true
+	checkHours := int(opts.CheckInterval.Hours())
+	if checkHours <= 0 {
+		checkHours = 6
 	}
 	startTime := opts.StartTime
 	if startTime.IsZero() {
 		startTime = time.Now()
 	}
 	tb := &Bot{
-		chatID:        opts.ChatID,
-		checkInterval: opts.CheckInterval,
-		label:         opts.Label,
-		selfVer:       opts.SelfVersion,
-		runner:        opts.Runner,
-		hc:            opts.HTTPClient,
-		dnsCfg:        opts.DNSConfig,
-		adminIDs:      admins,
-		autoUpdate:    opts.AutoUpdate,
-		tiers:         opts.Tiers,
-		logPath:       opts.LogPath,
-		startTime:     startTime,
-		state:         newBotState(opts.InitialMenuMID, opts.PersistMenuMID),
+		chatID:     opts.ChatID,
+		selfVer:    opts.SelfVersion,
+		runner:     opts.Runner,
+		hc:         opts.HTTPClient,
+		dnsCfg:     opts.DNSConfig,
+		tiers:      opts.Tiers,
+		logPath:    opts.LogPath,
+		startTime:  startTime,
+		refreshIPs: opts.RefreshIPs,
+		settingsCh: make(chan struct{}, 1),
+		set:        newBotSettings(opts.AutoUpdate, opts.AutoUpdateSelf, checkHours, opts.Label, opts.AdminIDs, opts.BackupKeep, opts.Settings),
+		state:      newBotState(opts.InitialMenuMID, opts.PersistMenuMID),
+	}
+	tb.set.onInterval = func() {
+		select {
+		case tb.settingsCh <- struct{}{}:
+		default:
+		}
+	}
+	if opts.Runner != nil {
+		opts.Runner.SetBackupKeep(opts.BackupKeep)
+		tb.set.onBackupKeep = func(n int) { opts.Runner.SetBackupKeep(n) }
 	}
 	b, err := bot.New(opts.Token,
 		bot.WithHTTPClient(60*time.Second+15*time.Second, opts.HTTPClient),
@@ -167,13 +182,24 @@ func (t *Bot) Start(ctx context.Context) error {
 // new version appears (compared to what was previously shown), it deletes
 // the current menu message and sends a fresh one with the Обновить button.
 func (t *Bot) periodicCheck(ctx context.Context) {
-	tick := time.NewTicker(t.checkInterval)
-	defer tick.Stop()
+	timer := time.NewTimer(t.set.CheckInterval())
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-t.settingsCh:
+			// Interval changed via settings — restart the wait with the new
+			// value instead of firing a check now.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(t.set.CheckInterval())
+		case <-timer.C:
+			timer.Reset(t.set.CheckInterval())
 			logger.Logf("Periodic check")
 			_, prevLatest, prevAvailable, _ := t.state.snapshotPodkop()
 			prevSelfLatest, prevSelfAvail := t.state.snapshotSelf()
@@ -181,7 +207,7 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 			_, newLatest, newAvailable, oldMID := t.state.snapshotPodkop()
 
 			if newAvailable && (!prevAvailable || newLatest != prevLatest) {
-				if t.autoUpdate {
+				if t.set.AutoUpdate() {
 					t.autoUpdatePodkop(ctx, oldMID)
 				} else {
 					// Notify: delete the stale menu and post a fresh one so
@@ -200,7 +226,11 @@ func (t *Bot) periodicCheck(ctx context.Context) {
 			// updater itself, so a bad self-release can't silently brick).
 			newSelfLatest, newSelfAvail := t.state.snapshotSelf()
 			if newSelfAvail && (!prevSelfAvail || newSelfLatest != prevSelfLatest) {
-				t.notifySelfUpdate(ctx, newSelfLatest)
+				if t.set.AutoUpdateSelf() {
+					t.autoSelfUpdate(ctx)
+				} else {
+					t.notifySelfUpdate(ctx, newSelfLatest)
+				}
 			}
 		}
 	}
@@ -232,13 +262,21 @@ func (t *Bot) publishCommands(ctx context.Context) {
 	}
 }
 
-func (t *Bot) fallbackHandler(_ context.Context, _ *bot.Bot, update *models.Update) {
+func (t *Bot) fallbackHandler(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	// Silently ignore messages and callbacks from other chats.
-	if update.Message != nil && update.Message.Chat.ID != t.chatID {
-		return
-	}
 	if update.CallbackQuery != nil && update.CallbackQuery.Message.Message != nil &&
 		update.CallbackQuery.Message.Message.Chat.ID != t.chatID {
 		return
+	}
+	msg := update.Message
+	if msg == nil || msg.Chat.ID != t.chatID {
+		return
+	}
+	// A plain text reply may be the input the settings menu is waiting for.
+	if msg.Text != "" && !strings.HasPrefix(msg.Text, "/") {
+		if msg.From != nil && !t.set.Allowed(msg.From.ID) {
+			return
+		}
+		t.handleAwaitedInput(ctx, msg.Text)
 	}
 }

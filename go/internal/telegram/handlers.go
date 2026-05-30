@@ -39,6 +39,19 @@ func (t *Bot) registerHandlers() {
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_all", bot.MatchTypeExact, t.onRollbackAll)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_to:", bot.MatchTypePrefix, t.onRollbackTo)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_rollback_confirm", bot.MatchTypeExact, t.onRollbackConfirm)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_settings", bot.MatchTypeExact, t.onSettings)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_autoupd", bot.MatchTypeExact, t.onSetAutoUpd)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_autoupd_self", bot.MatchTypeExact, t.onSetAutoUpdSelf)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_interval", bot.MatchTypeExact, t.onSetInterval)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_int:", bot.MatchTypePrefix, t.onSetInt)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_keep", bot.MatchTypeExact, t.onSetKeep)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_keep_n:", bot.MatchTypePrefix, t.onSetKeepN)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_ipref", bot.MatchTypeExact, t.onSetIPRefresh)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_show", bot.MatchTypeExact, t.onSetShow)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_label", bot.MatchTypeExact, t.onSetLabel)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_admins", bot.MatchTypeExact, t.onSetAdmins)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_admin_add", bot.MatchTypeExact, t.onSetAdminAdd)
+	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_set_admin_clear", bot.MatchTypeExact, t.onSetAdminClear)
 	t.b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "cmd_ok", bot.MatchTypeExact, t.onOK)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, t.onStartOrMenu)
 	t.b.RegisterHandler(bot.HandlerTypeMessageText, "/menu", bot.MatchTypeExact, t.onStartOrMenu)
@@ -53,10 +66,7 @@ func (t *Bot) registerHandlers() {
 // allowedUser reports whether userID may issue commands. An empty admin set
 // means anyone in the configured chat is allowed (backward-compatible).
 func (t *Bot) allowedUser(userID int64) bool {
-	if len(t.adminIDs) == 0 {
-		return true
-	}
-	return t.adminIDs[userID]
+	return t.set.Allowed(userID)
 }
 
 // answerAlert acks a callback with a popup alert (used for access-denied and
@@ -420,7 +430,12 @@ func (t *Bot) onUpdateSelf(ctx context.Context, _ *bot.Bot, update *models.Updat
 		return
 	}
 	defer release()
+	t.performSelfUpdate(ctx)
+}
 
+// performSelfUpdate runs the self-update flow and renders the result. The
+// caller owns the busy guard.
+func (t *Bot) performSelfUpdate(ctx context.Context) {
 	t.editBusy(ctx, "Обновление updater...")
 
 	if t.runner == nil {
@@ -433,7 +448,7 @@ func (t *Bot) onUpdateSelf(ctx context.Context, _ *bot.Bot, update *models.Updat
 		t.editResult(ctx, "Ошибка self-update\n"+status)
 		return
 	}
-	t.editResult(ctx, "Готово\n"+status)
+	t.editResult(ctx, status)
 }
 
 // onOK: вернуться в дефолтное меню.

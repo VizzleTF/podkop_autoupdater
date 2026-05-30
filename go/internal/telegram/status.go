@@ -111,7 +111,7 @@ func (t *Bot) statusText() string {
 		b.WriteString("Проверка: " + lc.Format("15:04:05") + " (" + humanizeSince(time.Since(lc)) + " назад)\n")
 	}
 	b.WriteString("Аптайм: " + humanizeSince(time.Since(t.startTime)) + "\n")
-	b.WriteString("Авто-обновление: " + onoff(t.autoUpdate))
+	b.WriteString("Авто-обновление: " + onoff(t.set.AutoUpdate()))
 	return b.String()
 }
 
@@ -131,6 +131,23 @@ func (t *Bot) autoUpdatePodkop(ctx context.Context, oldMID int) {
 	target, _ := t.state.latestAndTag()
 	logger.Logf("Auto-updating podkop to %s", target)
 	t.performPodkopUpdate(ctx)
+}
+
+// autoSelfUpdate installs a newly-detected updater release without a button
+// press. Posts a fresh menu (so Telegram notifies) and runs self-update under
+// the busy guard. Self-update exits the process for procd respawn.
+func (t *Bot) autoSelfUpdate(ctx context.Context) {
+	if !t.state.tryBusy() {
+		logger.Logf("auto self-update skipped: busy")
+		return
+	}
+	defer t.state.clearBusy()
+	if oldMID := t.state.menuID(); oldMID != 0 {
+		_ = t.deleteMessage(ctx, oldMID)
+	}
+	t.state.setMenuID(0)
+	logger.Logf("Auto self-update starting")
+	t.performSelfUpdate(ctx)
 }
 
 // notifySelfUpdate posts a fresh "updater update available" menu, deleting the

@@ -68,6 +68,36 @@ func TestBackupVersionsStampsRestore(t *testing.T) {
 	}
 }
 
+func TestPrune(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "podkop")
+	if err := os.WriteFile(cfg, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg)
+	stamps := []string{"20260530-100000", "20260530-110000", "20260530-120000", "20260530-130000"}
+	for _, st := range stamps {
+		if _, err := s.Backup("0.7.18", st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := s.Prune(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed=%d want 2", removed)
+	}
+	ents, _ := s.List()
+	if len(ents) != 2 || ents[0].Stamp != "20260530-130000" || ents[1].Stamp != "20260530-120000" {
+		t.Fatalf("kept wrong newest: %+v", ents)
+	}
+	// keep=0 → unlimited, no-op.
+	if n, _ := s.Prune(0); n != 0 {
+		t.Fatalf("prune(0) removed %d", n)
+	}
+}
+
 func TestInvalidInputs(t *testing.T) {
 	s := New(filepath.Join(t.TempDir(), "podkop"))
 	if _, err := s.Backup("../etc/passwd", "20260530-100000"); err == nil {

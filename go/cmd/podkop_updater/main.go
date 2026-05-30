@@ -153,9 +153,13 @@ func runDaemon() int {
 		DNSConfig:      dnsCfg,
 		AdminIDs:       cfg.AdminIDs,
 		AutoUpdate:     cfg.AutoUpdate,
+		AutoUpdateSelf: cfg.AutoUpdateSelf,
+		BackupKeep:     cfg.BackupKeep,
 		Tiers:          tt,
 		LogPath:        logPath,
 		StartTime:      startTime,
+		Settings:       configStore{},
+		RefreshIPs:     func(c context.Context) { refreshEmergencyIPsOnce(c, dohHC, tt) },
 		InitialMenuMID: cfg.MenuMID,
 		PersistMenuMID: persistMenuMID,
 	})
@@ -269,6 +273,17 @@ func dohEndpointsFromPodkop() []string {
 	}
 	return transport.DefaultDoHEndpoints
 }
+
+// configStore adapts the config package's UCI setters to telegram.SettingsStore
+// so the settings menu can persist edits.
+type configStore struct{}
+
+func (configStore) SaveAutoUpdate(v bool) error     { return config.SaveAutoUpdate(v) }
+func (configStore) SaveAutoUpdateSelf(v bool) error { return config.SaveAutoUpdateSelf(v) }
+func (configStore) SaveCheckInterval(h int) error   { return config.SaveCheckInterval(h) }
+func (configStore) SaveRouterLabel(s string) error  { return config.SaveRouterLabel(s) }
+func (configStore) SaveAdminIDs(ids []int64) error  { return config.SaveAdminIDs(ids) }
+func (configStore) SaveBackupKeep(n int) error      { return config.SaveBackupKeep(n) }
 
 // persistMenuMID writes the tracked Telegram menu id to UCI. Best-effort —
 // errors are logged but not surfaced to the caller, since failing to

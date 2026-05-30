@@ -58,6 +58,7 @@ func buildDashboardKB(updPodkop, updSelf bool) *models.InlineKeyboardMarkup {
 		},
 		[]models.InlineKeyboardButton{
 			{Text: "📦 Бэкапы", CallbackData: "cmd_backups"},
+			{Text: "⚙️ Настройки", CallbackData: "cmd_settings"},
 		},
 	)
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
@@ -128,10 +129,11 @@ func (t *Bot) replaceMenuRaw(ctx context.Context, text string, kb *models.Inline
 // in a shared chat (e.g. when multiple routers post to one supergroup) is
 // attributable. Empty label leaves text untouched.
 func (t *Bot) withLabel(text string) string {
-	if t.label == "" {
+	label := t.set.Label()
+	if label == "" {
 		return text
 	}
-	return "<b>" + html.EscapeString(t.label) + "</b>\n" + text
+	return "<b>" + html.EscapeString(label) + "</b>\n" + text
 }
 
 // updateMenu is the fire-and-log variant used by callback handlers: edit
@@ -171,8 +173,8 @@ func (t *Bot) dashboardText() string {
 	selfLatest, selfUpd := t.state.snapshotSelf()
 
 	var b strings.Builder
-	if t.label != "" {
-		b.WriteString("🏠 <b>" + html.EscapeString(t.label) + "</b>\n")
+	if label := t.set.Label(); label != "" {
+		b.WriteString("🏠 <b>" + html.EscapeString(label) + "</b>\n")
 	} else {
 		b.WriteString("🤖 <b>Podkop Updater</b>\n")
 	}

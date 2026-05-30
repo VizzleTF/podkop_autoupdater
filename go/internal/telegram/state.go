@@ -37,6 +37,10 @@ type botState struct {
 	restoreTarget string
 	deleteTarget  string
 
+	// awaiting marks that the settings menu is expecting the next plain text
+	// message as input (router label or admin id).
+	awaiting awaitKind
+
 	// busy guards long-running side effects (restart/update/self-update) so a
 	// double-click or an overlapping auto-update can't run two install.sh
 	// invocations as root concurrently.
@@ -171,6 +175,36 @@ func (s *botState) restore() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.restoreTarget
+}
+
+// awaitKind enumerates the pending text-input modes of the settings menu.
+type awaitKind int
+
+const (
+	awaitNone awaitKind = iota
+	awaitLabel
+	awaitAdminAdd
+)
+
+// setAwait marks the bot as waiting for a text reply of the given kind.
+func (s *botState) setAwait(k awaitKind) {
+	s.mu.Lock()
+	s.awaiting = k
+	s.mu.Unlock()
+}
+
+// await returns the pending text-input kind.
+func (s *botState) await() awaitKind {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.awaiting
+}
+
+// clearAwait resets the pending text-input kind.
+func (s *botState) clearAwait() {
+	s.mu.Lock()
+	s.awaiting = awaitNone
+	s.mu.Unlock()
 }
 
 // setDelete stages the backup id to delete.

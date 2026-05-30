@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/VizzleTF/podkop_autoupdater/go/internal/cfgbackup"
@@ -46,14 +47,36 @@ const (
 
 // Runner implements telegram.UpdateRunner backed by real system operations.
 type Runner struct {
-	hc      *http.Client
-	logPath string
-	dns     DNSConfig
-	cfg     *cfgbackup.Store
+	hc         *http.Client
+	logPath    string
+	dns        DNSConfig
+	cfg        *cfgbackup.Store
+	backupKeep atomic.Int64 // how many config backups to retain (0 = unlimited)
 }
 
 func NewRunner(hc *http.Client, logPath string, dns DNSConfig) *Runner {
 	return &Runner{hc: hc, logPath: logPath, dns: dns, cfg: cfgbackup.New("")}
+}
+
+// SetBackupKeep updates the config-backup retention limit at runtime.
+func (r *Runner) SetBackupKeep(n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.backupKeep.Store(int64(n))
+}
+
+// pruneBackups trims old config backups to the retention limit. Best-effort.
+func (r *Runner) pruneBackups() {
+	keep := int(r.backupKeep.Load())
+	if keep <= 0 {
+		return
+	}
+	if removed, err := r.cfg.Prune(keep); err != nil {
+		logger.Errf("backup prune: %v", err)
+	} else if removed > 0 {
+		logger.Logf("Backup prune: removed %d old config backups (keep %d)", removed, keep)
+	}
 }
 
 // RunRestart restarts the podkop service and polls the fakeip DNS check

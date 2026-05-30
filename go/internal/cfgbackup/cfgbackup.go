@@ -111,6 +111,26 @@ func (s *Store) RestoreID(id string) error {
 	return nil
 }
 
+// Prune keeps the newest `keep` backups (by timestamp, across all versions)
+// and removes the rest. keep <= 0 means unlimited (no-op). Returns the number
+// removed.
+func (s *Store) Prune(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	all, err := s.List() // newest first
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, e := range all[min(keep, len(all)):] {
+		if err := s.Delete(e.ID); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
+}
+
 // Delete removes the backup identified by id.
 func (s *Store) Delete(id string) error {
 	if _, ok := Parse(id); !ok {

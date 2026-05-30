@@ -29,6 +29,7 @@ func (r *Runner) RunDowngrade(ctx context.Context, target, tag string) (string, 
 		logger.Errf("downgrade: backup current config: %v", err)
 	} else {
 		logger.Logf("Downgrade: backed up current config (%s)", before)
+		r.pruneBackups()
 	}
 
 	urls, err := updater.AssetURLsForTag(ctx, r.hc, tag, isAPK)
