@@ -1,5 +1,7 @@
 [Русская версия](./README_ru.md)
 
+<a href="https://www.buymeacoffee.com/vizzletf" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="60" width="217"></a>
+
 # podkop_updater
 
 Single static Go binary (procd service) that watches
