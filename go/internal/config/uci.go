@@ -35,6 +35,7 @@ type Config struct {
 	AutoUpdate     bool     // when true, periodic check auto-installs new podkop releases instead of only notifying
 	AutoUpdateSelf bool     // when true, periodic check auto-installs new updater releases too
 	BackupKeep     int      // how many config backups to retain (0 = unlimited)
+	SocksAddr      string   // explicit SOCKS5 endpoint for the Telegram data path; empty = pinned-IP only; "auto" = detect podkop's mixed inbound
 }
 
 func Load() (*Config, error) {
@@ -92,6 +93,7 @@ func Load() (*Config, error) {
 			backupKeep = n
 		}
 	}
+	socksAddr, _ := uci.GetIn(uciPkg, uciSec, "socks_addr")
 	return &Config{
 		BotToken:       token,
 		ChatID:         chatID,
@@ -104,6 +106,7 @@ func Load() (*Config, error) {
 		AutoUpdate:     autoUpdate,
 		AutoUpdateSelf: autoUpdateSelf,
 		BackupKeep:     backupKeep,
+		SocksAddr:      socksAddr,
 	}, nil
 }
 
@@ -149,6 +152,12 @@ func SaveAdminIDs(ids []int64) error {
 // SaveBackupKeep persists how many config backups to retain (0 = unlimited).
 func SaveBackupKeep(n int) error {
 	return setKey("backup_keep", strconv.Itoa(n))
+}
+
+// SaveSocksAddr persists the explicit SOCKS5 endpoint for the Telegram data
+// path. Empty = pinned-IP only; "auto" = detect podkop's mixed inbound.
+func SaveSocksAddr(addr string) error {
+	return setKey("socks_addr", addr)
 }
 
 func setKey(key, val string) error {

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -108,8 +110,14 @@ func runDaemon() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	socks := service.DetectSocksAddr()
-	logger.Logf("SOCKS5 endpoint: %s", socks)
+	// SOCKS5 is opt-in: the data path is pinned-IP-only unless the operator
+	// explicitly sets socks_addr. "auto" detects podkop's mixed inbound;
+	// anything else is used verbatim as the proxy endpoint.
+	socks := cfg.SocksAddr
+	if socks == "auto" {
+		socks = service.DetectSocksAddr()
+	}
+	logger.Logf("SOCKS5 endpoint: %q (configured: %q)", socks, cfg.SocksAddr)
 
 	startIPs := cfg.EmergencyIPs
 	if len(startIPs) == 0 {
@@ -259,19 +267,36 @@ func refreshEmergencyIPsOnce(ctx context.Context, hc *http.Client, tt *transport
 	}
 	merged := mergeIPs(defaultEmergencyIPs, discovered)
 	logger.Logf("IP refresh: discovered=%v merged=%v", discovered, merged)
-	tt.RebuildEmergency(merged)
+	tt.SetEmergencyIPs(merged)
 	if err := config.SaveEmergencyIPs(merged); err != nil {
 		logger.Errf("IP refresh persist: %v", err)
 	}
 }
 
-// dohEndpointsFromPodkop returns the DoH endpoint configured in podkop's
-// UCI; falls back to the compiled defaults if podkop isn't using DoH.
+// dohEndpointsFromPodkop returns the DoH endpoints to query. It always
+// includes the compiled IP-literal defaults so background IP discovery never
+// depends on the system resolver. Podkop's own DoH endpoint is prepended only
+// when its host is an IP literal — a hostname endpoint would need the (possibly
+// broken) system resolver to bootstrap, defeating the purpose.
 func dohEndpointsFromPodkop() []string {
-	if ep := service.PodkopDoHEndpoint(); ep != "" {
-		return []string{ep}
+	ep := service.PodkopDoHEndpoint()
+	if ep != "" && dohHostIsIP(ep) {
+		return append([]string{ep}, transport.DefaultDoHEndpoints...)
+	}
+	if ep != "" {
+		logger.Logf("IP refresh: podkop DoH endpoint %q is a hostname, skipping (would need system DNS)", ep)
 	}
 	return transport.DefaultDoHEndpoints
+}
+
+// dohHostIsIP reports whether the host part of a DoH endpoint URL is an IP
+// literal (so it can be reached without the system resolver).
+func dohHostIsIP(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	return net.ParseIP(u.Hostname()) != nil
 }
 
 // configStore adapts the config package's UCI setters to telegram.SettingsStore

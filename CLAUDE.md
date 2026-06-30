@@ -33,16 +33,17 @@ Release: push an annotated `v*` tag from `main`. The workflow builds the five-ar
 ## Architecture
 
 ### Module wiring (`go/cmd/podkop_updater/main.go`)
-`main` constructs everything: loads UCI config → opens log + PID lock → picks SOCKS5 endpoint via `service.DetectSocksAddr` → builds the tiered transport → creates an `http.Client` for Telegram (timeout = long-poll window + 15s) and a separate one for updates (5min, install.sh fetches can outlast long-poll) → starts `runEmergencyIPRefresh` goroutine → boots the Telegram bot. PID lockfile at `/tmp/podkop_updater.pid`; signal 0 used to verify the recorded PID is alive before refusing to start.
+`main` constructs everything: loads UCI config → opens log + PID lock → resolves the SOCKS5 endpoint from `socks_addr` (`"auto"` → `service.DetectSocksAddr`, empty → none) → builds the tiered transport → creates an `http.Client` for Telegram (timeout = long-poll window + 15s) and a separate one for updates (5min, install.sh fetches can outlast long-poll) → starts `runEmergencyIPRefresh` goroutine → boots the Telegram bot. PID lockfile at `/tmp/podkop_updater.pid`; signal 0 used to verify the recorded PID is alive before refusing to start.
 
-### Three-tier HTTP transport (`go/internal/transport/`)
-`TieredTransport.RoundTrip` snapshots tiers under a mutex and walks starting from a sticky index; first success updates sticky. A `runStickyReset` goroutine in `main.go` calls `ResetSticky` every 10min to drop the sticky index back to tier 0, so a transient outage that pushed traffic onto an emergency-IP tier doesn't pin it there after SOCKS5/direct recovers. Tiers in order:
+### DNS-free HTTP transport (`go/internal/transport/`)
+The Telegram data path **never** consults the system resolver — that was the failure mode (DNS works, later breaks, bot dies). `TieredTransport.RoundTrip` snapshots tiers under a mutex and walks starting from a sticky index; first success updates sticky. A `runStickyReset` goroutine in `main.go` calls `ResetSticky` every 10min to drop the sticky index back to tier 0, so a transient outage that pushed traffic onto the pinned-IP tier doesn't pin it there after SOCKS5 recovers. At most two tiers, in order:
 
-1. SOCKS5 to podkop's mixed inbound (only added if `service.DetectSocksAddr` finds one in the live sing-box config).
-2. Direct.
-3. Emergency tiers — one per discovered Telegram IP. Each pins `api.telegram.org` to a specific IP (DNS override scoped to that host, SNI preserved so TLS still validates).
+1. SOCKS5 — only when the operator explicitly sets `socks_addr` (verbatim address, or `"auto"` to detect podkop's mixed inbound). The proxy resolves `api.telegram.org` itself, so the local resolver is bypassed.
+2. Pinned IPs — a **single** `pinnedTransport` whose dialer substitutes a known Telegram IP for `api.telegram.org` (SNI preserved, so TLS still validates), rotating through the current IP set until one connects. One transport, one connection pool. Any non-pinned host (e.g. github for the update path) is dialed normally via the system resolver — those IPs aren't pinned, and github fetches are on-demand, not the always-on poll. The IP set is swapped in place by `SetEmergencyIPs` (no tier rebuild, sticky-safe).
 
-`discovery.go` queries DoH (endpoint pulled from podkop's UCI; falls back to `transport.DefaultDoHEndpoints`) for current `api.telegram.org` A records **concurrently** (one goroutine per endpoint, so a blocked resolver can't serialize the rest), filters to known Telegram CIDRs, and logs any answer that falls outside every known CIDR (early signal the hardcoded list is drifting). Refresh schedule: initial run 30s after startup, then every 24h. Discovered IPs are merged with the compiled `defaultEmergencyIPs` in `main.go` so a thin DoH reply never shrinks coverage. Merged set is persisted to UCI (`emergency_ips`) so reboots start with the last known list.
+Background IP refresh is the only place DNS is used, and it uses DoH (fixed resolver IPs over HTTPS) — see below. If DoH fails, the previously known IP set is kept.
+
+`discovery.go` queries DoH (`transport.DefaultDoHEndpoints`, all IP-literal URLs; podkop's own DoH endpoint is prepended by `dohEndpointsFromPodkop` **only when its host is an IP literal** — a hostname endpoint would need the possibly-broken system resolver to bootstrap, so it's skipped) for current `api.telegram.org` A records **concurrently** (one goroutine per endpoint, so a blocked resolver can't serialize the rest), filters to known Telegram CIDRs, and logs any answer that falls outside every known CIDR (early signal the hardcoded list is drifting). Refresh schedule: initial run 30s after startup, then every 24h. Discovered IPs are merged with the compiled `defaultEmergencyIPs` in `main.go` so a thin DoH reply never shrinks coverage. Merged set is persisted to UCI (`emergency_ips`) so reboots start with the last known list.
 
 ### Telegram state machine (`go/internal/telegram/`)
 Built on `github.com/go-telegram/bot`. The bot owns exactly one tracked menu message at a time, cycling through states:
@@ -81,6 +82,7 @@ After every restart/update, polls `fakeip.podkop.fyi` via `127.0.0.42` every 2s 
 | `router_label`  | string | Optional human-readable router name; prefixed in bold to every menu message via `Bot.withLabel`. Empty = fall back to hostname. Useful when multiple routers post into one shared chat. |
 | `admin_ids`     | string | Space-separated Telegram user IDs allowed to issue commands. Empty = anyone in the chat (backward-compatible). Gated by `From.ID` on every callback and slash command. |
 | `auto_update`   | bool   | `1`/`true` = periodic check auto-installs new podkop releases (still notify-only for the updater itself). Default off. |
+| `socks_addr`    | string | Explicit SOCKS5 endpoint for the Telegram data path. Empty/unset = pinned-IP only (no system DNS). `"auto"` = detect podkop's mixed inbound via `service.DetectSocksAddr`. Any other value = used verbatim as `host:port`. |
 | `emergency_ips` | string | Space-separated; written by the daemon, read on next start  |
 | `menu_mid`      | int    | Tracked Telegram menu message ID; written on every transition |
 

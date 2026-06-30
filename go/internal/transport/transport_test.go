@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +101,83 @@ func TestRoundTrip_Sticky(t *testing.T) {
 	}
 	if b.calls.Load() != 3 {
 		t.Fatalf("b should be tried 3 times, got %d", b.calls.Load())
+	}
+}
+
+// TestPinnedDial_SubstitutesIP verifies the pinned host is dialed at one of
+// the configured IPs (not via the system resolver) and that an unreachable IP
+// falls through to the next one.
+func TestPinnedDial_SubstitutesIP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+
+	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1", host})
+	var dialed []string
+	base := pt.rt.DialContext
+	pt.rt.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return base(ctx, network, addr)
+	}
+
+	req, _ := http.NewRequest("GET", "http://pinned.example:"+port+"/", nil)
+	resp, err := pt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+	// The request addr handed to DialContext must be the pinned host, never a
+	// resolved IP — substitution happens inside dial.
+	if len(dialed) == 0 || dialed[0] != "pinned.example:"+port {
+		t.Fatalf("expected dial to pinned host, got %v", dialed)
+	}
+}
+
+// TestPinnedDial_AllIPsDead returns an error mentioning the pinned failure.
+func TestPinnedDial_AllIPsDead(t *testing.T) {
+	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1", "192.0.2.2"})
+	req, _ := http.NewRequest("GET", "http://pinned.example:9/", nil)
+	_, err := pt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("want error when all pinned IPs dead")
+	}
+}
+
+// TestPinnedDial_OtherHostUsesResolver confirms a non-pinned host is dialed
+// normally (so github fetches still work).
+func TestPinnedDial_OtherHostUsesResolver(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1"})
+	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
+	resp, err := pt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("non-pinned host should dial normally: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// TestSetEmergencyIPs_InPlace confirms IP swap updates the tier without
+// changing tier identity (sticky-safe) and refreshes the display name.
+func TestSetEmergencyIPs_InPlace(t *testing.T) {
+	tt := New("", "pinned.example", []string{"192.0.2.1"})
+	if got := tt.Tiers(); len(got) != 1 || got[0] != "telegram-ip(1)" {
+		t.Fatalf("unexpected tiers: %v", got)
+	}
+	ipTier := tt.ipTier
+	tt.SetEmergencyIPs([]string{"192.0.2.1", "192.0.2.2", "192.0.2.3"})
+	if tt.ipTier != ipTier {
+		t.Fatal("pinned tier identity must not change on IP swap")
+	}
+	if got := tt.Tiers(); got[len(got)-1] != "telegram-ip(3)" {
+		t.Fatalf("tier name not refreshed: %v", got)
+	}
+	if got := ipTier.snapshot(); len(got) != 3 {
+		t.Fatalf("IP set not updated: %v", got)
 	}
 }
 

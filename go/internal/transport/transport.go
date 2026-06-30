@@ -1,8 +1,22 @@
-// Package transport implements an http.RoundTripper with three-tier
-// fallback: Podkop SOCKS5 → direct → emergency Telegram IPs.
+// Package transport implements an http.RoundTripper that reaches Telegram
+// without ever depending on the system DNS resolver for api.telegram.org.
 //
-// The active tier is sticky: once a tier succeeds it becomes the first try
-// for subsequent requests, with a short connect timeout before falling back
+// The data path has at most two tiers:
+//
+//   - tier 0: Podkop SOCKS5 — only when the operator explicitly configures a
+//     SOCKS endpoint. The proxy resolves api.telegram.org itself, so the local
+//     resolver is not consulted. Useful when the ISP blocks Telegram IPs.
+//   - tier 1: pinned IPs — a single transport whose dialer substitutes a known
+//     Telegram IP for api.telegram.org (SNI preserved, so TLS still validates).
+//     Any other host (e.g. github for the update path) is dialed normally via
+//     the system resolver, since those IPs are not pinned.
+//
+// The pinned IP set is refreshed in the background via DoH (see discovery.go),
+// which queries fixed resolver IPs over HTTPS and therefore also avoids the
+// system resolver. If DoH fails, the previously known IP set is kept.
+//
+// The active tier is sticky: once a tier succeeds it becomes the first try for
+// subsequent requests, with a short connect timeout before falling back
 // through the cascade again.
 package transport
 
@@ -12,8 +26,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -38,15 +52,15 @@ type tier struct {
 type TieredTransport struct {
 	pinnedHost string
 
-	mu    sync.Mutex
-	tiers []*tier
-	idx   int // sticky index (last known good tier)
+	mu     sync.Mutex
+	tiers  []*tier
+	idx    int              // sticky index (last known good tier)
+	ipTier *pinnedTransport // the pinned-IP tier, for in-place IP updates
 }
 
-// New builds the standard three-tier transport for podkop_updater:
-//   - tier 0: Podkop SOCKS5 (if socksAddr is non-empty)
-//   - tier 1: Direct
-//   - tier 2..N: Emergency IPs that override DNS for telegramHost
+// New builds the standard transport for podkop_updater:
+//   - tier 0: Podkop SOCKS5 (only if socksAddr is non-empty)
+//   - tier 1: pinned Telegram IPs (DNS-free for telegramHost)
 func New(socksAddr, telegramHost string, emergencyIPs []string) *TieredTransport {
 	var tiers []*tier
 	if socksAddr != "" {
@@ -54,49 +68,44 @@ func New(socksAddr, telegramHost string, emergencyIPs []string) *TieredTransport
 			tiers = append(tiers, &tier{name: "socks5:" + socksAddr, rt: rt})
 		}
 	}
-	tiers = append(tiers, &tier{name: "direct", rt: directRoundTripper()})
-	for _, ip := range emergencyIPs {
-		tiers = append(tiers, &tier{
-			name: "emergency:" + ip,
-			rt:   pinnedHostRoundTripper(telegramHost, ip),
-		})
-	}
+	pt := newPinnedTransport(telegramHost, emergencyIPs)
+	tiers = append(tiers, &tier{name: ipTierName(emergencyIPs), rt: pt})
 	return &TieredTransport{
 		pinnedHost: telegramHost,
 		tiers:      tiers,
 		idx:        0,
+		ipTier:     pt,
 	}
 }
 
-// RebuildEmergency replaces the emergency-tier set with new IPs while
-// preserving the SOCKS5 and direct tiers. Resets the sticky index since
-// the slice order may have shifted.
-func (t *TieredTransport) RebuildEmergency(ips []string) {
-	newEmergency := make([]*tier, 0, len(ips))
-	for _, ip := range ips {
-		newEmergency = append(newEmergency, &tier{
-			name: "emergency:" + ip,
-			rt:   pinnedHostRoundTripper(t.pinnedHost, ip),
-		})
-	}
+// ipTierName labels the pinned-IP tier for /status display.
+func ipTierName(ips []string) string {
+	return fmt.Sprintf("telegram-ip(%d)", len(ips))
+}
+
+// SetEmergencyIPs swaps the pinned-IP set in place. The pinned tier itself is
+// unchanged (same transport, same connection pool), so the sticky index stays
+// valid and there is no tier reordering. No-op if there is no pinned tier.
+func (t *TieredTransport) SetEmergencyIPs(ips []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	kept := make([]*tier, 0, len(t.tiers))
-	for _, x := range t.tiers {
-		if strings.HasPrefix(x.name, "emergency:") {
-			continue
-		}
-		kept = append(kept, x)
+	if t.ipTier == nil {
+		return
 	}
-	t.tiers = append(kept, newEmergency...)
-	t.idx = 0
-	logger.Logf("Transport: rebuilt emergency tiers: %v", ips)
+	t.ipTier.setIPs(ips)
+	for _, x := range t.tiers {
+		if x.rt == t.ipTier {
+			x.name = ipTierName(ips)
+		}
+	}
+	logger.Logf("Transport: updated telegram IPs: %v", ips)
 }
 
 // ResetSticky moves the sticky index back to tier 0 so the next request
-// prefers the cheapest tier (SOCKS5/direct) again. Called periodically so a
-// transient outage that pushed us onto an emergency-IP tier does not pin us
-// there after the primary path recovers. No-op if already at 0.
+// prefers the cheapest/most-preferred tier (SOCKS5 if configured) again.
+// Called periodically so a transient outage that pushed us onto the pinned-IP
+// tier does not pin us there after the primary path recovers. No-op if already
+// at 0.
 func (t *TieredTransport) ResetSticky() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -174,13 +183,79 @@ func cloneReq(req *http.Request) *http.Request {
 	return r2
 }
 
-func directRoundTripper() http.RoundTripper {
-	return &http.Transport{
-		DialContext:           dialer().DialContext,
-		TLSHandshakeTimeout:   defaultTLSTimeout,
-		IdleConnTimeout:       defaultIdleConnTimeout,
-		ResponseHeaderTimeout: 0, // none; caller controls via context
+// pinnedTransport is an http.RoundTripper whose dialer, when connecting to the
+// pinned host, substitutes a known IP from a swappable set and falls through
+// the set until one connects. Every other host is dialed normally (system
+// resolver), so non-Telegram traffic (e.g. github fetches) keeps working.
+//
+// SNI and TLS host verification still use the original hostname, so the
+// certificate validates correctly even though we dial a raw IP.
+type pinnedTransport struct {
+	host string
+	rt   *http.Transport
+
+	mu  sync.RWMutex
+	ips []string
+	rr  atomic.Uint32 // round-robin start offset, spreads fresh dials across IPs
+}
+
+func newPinnedTransport(host string, ips []string) *pinnedTransport {
+	pt := &pinnedTransport{host: host}
+	pt.setIPs(ips)
+	pt.rt = &http.Transport{
+		DialContext:         pt.dial,
+		TLSHandshakeTimeout: defaultTLSTimeout,
+		IdleConnTimeout:     defaultIdleConnTimeout,
 	}
+	return pt
+}
+
+func (pt *pinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return pt.rt.RoundTrip(req)
+}
+
+func (pt *pinnedTransport) setIPs(ips []string) {
+	cp := append([]string(nil), ips...)
+	pt.mu.Lock()
+	pt.ips = cp
+	pt.mu.Unlock()
+}
+
+// snapshot returns the current IP set. The slice is never mutated in place
+// (setIPs replaces the header), so the returned value is safe to read after
+// the lock is dropped.
+func (pt *pinnedTransport) snapshot() []string {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	return pt.ips
+}
+
+func (pt *pinnedTransport) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if host != pt.host {
+		// Non-pinned host (e.g. github): dial via the system resolver.
+		return dialer().DialContext(ctx, network, addr)
+	}
+	ips := pt.snapshot()
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("transport: no pinned IPs for %s", host)
+	}
+	start := int(pt.rr.Add(1)-1) % len(ips)
+	d := dialer()
+	var lastErr error
+	for i := 0; i < len(ips); i++ {
+		ip := ips[(start+i)%len(ips)]
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		logger.Logf("Transport: telegram IP %s dial failed: %v", ip, err)
+	}
+	return nil, fmt.Errorf("all telegram IPs failed: %w", lastErr)
 }
 
 func socksRoundTripper(socksAddr string) http.RoundTripper {
@@ -199,26 +274,6 @@ func socksRoundTripper(socksAddr string) http.RoundTripper {
 	}
 	return &http.Transport{
 		DialContext:         dialCtx,
-		TLSHandshakeTimeout: defaultTLSTimeout,
-		IdleConnTimeout:     defaultIdleConnTimeout,
-	}
-}
-
-// pinnedHostRoundTripper returns a transport that, when dialing pinnedHost,
-// substitutes the destination IP. SNI and TLS host verification still use
-// the original hostname, so the certificate validates correctly.
-func pinnedHostRoundTripper(pinnedHost, ip string) http.RoundTripper {
-	return &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			h, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			if h == pinnedHost {
-				addr = net.JoinHostPort(ip, port)
-			}
-			return dialer().DialContext(ctx, network, addr)
-		},
 		TLSHandshakeTimeout: defaultTLSTimeout,
 		IdleConnTimeout:     defaultIdleConnTimeout,
 	}
