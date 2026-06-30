@@ -281,12 +281,26 @@ func refreshEmergencyIPsOnce(ctx context.Context, hc *http.Client, tt *transport
 func dohEndpointsFromPodkop() []string {
 	ep := service.PodkopDoHEndpoint()
 	if ep != "" && dohHostIsIP(ep) {
-		return append([]string{ep}, transport.DefaultDoHEndpoints...)
+		return dedupStrings(append([]string{ep}, transport.DefaultDoHEndpoints...))
 	}
 	if ep != "" {
 		logger.Logf("IP refresh: podkop DoH endpoint %q is a hostname, skipping (would need system DNS)", ep)
 	}
 	return transport.DefaultDoHEndpoints
+}
+
+// dedupStrings returns s with duplicates removed, preserving first-seen order.
+func dedupStrings(s []string) []string {
+	seen := make(map[string]struct{}, len(s))
+	out := s[:0]
+	for _, v := range s {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // dohHostIsIP reports whether the host part of a DoH endpoint URL is an IP
