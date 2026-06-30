@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -178,6 +179,73 @@ func TestSetEmergencyIPs_InPlace(t *testing.T) {
 	}
 	if got := ipTier.snapshot(); len(got) != 3 {
 		t.Fatalf("IP set not updated: %v", got)
+	}
+}
+
+// TestDegraded_TracksActualTier verifies Degraded reflects the last
+// *successful* tier and does not flap when ResetSticky optimistically nudges
+// the index back to 0 (the watchdog must not see spurious recover/degrade).
+func TestDegraded_TracksActualTier(t *testing.T) {
+	a := &fakeRT{name: "a", fail: true}
+	b := &fakeRT{name: "b"}
+	tt := newTiered(t, a, b)
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+
+	if _, err := tt.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if !tt.Degraded() {
+		t.Fatal("want degraded after falling through to tier b")
+	}
+
+	// ResetSticky alone must NOT clear degraded — only an actual tier-0 success.
+	tt.ResetSticky()
+	if !tt.Degraded() {
+		t.Fatal("ResetSticky must not flap degraded to false")
+	}
+
+	// tier-0 recovers; next request succeeds on it → no longer degraded.
+	a.fail = false
+	if _, err := tt.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if tt.Degraded() {
+		t.Fatal("want not degraded after a tier-0 success")
+	}
+}
+
+// TestEnsureReplayableBody covers the cross-tier retry fix: a non-replayable
+// body (GetBody == nil, like the go-telegram multipart pipe) must survive the
+// first tier consuming and closing it, so a later tier still reads it in full.
+func TestEnsureReplayableBody(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("payload123"))
+		_ = pw.Close()
+	}()
+	req, _ := http.NewRequest("POST", "http://example.com", pr)
+	req.GetBody = nil // a pipe body is not replayable
+
+	if err := ensureReplayableBody(req); err != nil {
+		t.Fatal(err)
+	}
+	if req.GetBody == nil {
+		t.Fatal("GetBody should be installed")
+	}
+
+	// First tier reads then closes its clone (as http.Transport does on error).
+	c1 := cloneReq(req)
+	b1, _ := io.ReadAll(c1.Body)
+	c1.Body.Close()
+	if string(b1) != "payload123" {
+		t.Fatalf("first read = %q", b1)
+	}
+	// Second tier must still see the full body, not a closed pipe.
+	c2 := cloneReq(req)
+	b2, _ := io.ReadAll(c2.Body)
+	c2.Body.Close()
+	if string(b2) != "payload123" {
+		t.Fatalf("second read = %q (cross-tier replay broken)", b2)
 	}
 }
 

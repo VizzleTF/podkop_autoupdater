@@ -40,6 +40,9 @@ type UpdateRunner interface {
 type TierReporter interface {
 	CurrentTier() string
 	Tiers() []string
+	// Degraded reports whether traffic is on a non-preferred fallback tier
+	// (primary path down). Drives the transport watchdog alerts.
+	Degraded() bool
 }
 
 // Bot is the daemon-side Telegram client. The Bot struct itself holds only
@@ -174,6 +177,7 @@ func (t *Bot) Start(ctx context.Context) error {
 	}
 
 	go t.periodicCheck(ctx)
+	go t.transportWatch(ctx)
 	t.b.Start(ctx)
 	return nil
 }

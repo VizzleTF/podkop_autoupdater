@@ -43,6 +43,14 @@ The Telegram data path **never** consults the system resolver — that was the f
 
 Background IP refresh is the only place DNS is used, and it uses DoH (fixed resolver IPs over HTTPS) — see below. If DoH fails, the previously known IP set is kept.
 
+`Degraded()` reports whether the *last successful* request fell through to a non-preferred tier (e.g. SOCKS5 down → on pinned IPs). It tracks the last actual success, **not** the sticky index, so `ResetSticky`'s optimistic 10min nudge to tier 0 doesn't make it flap — the transport watchdog (below) polls this and would otherwise emit a spurious recover/degrade pair every reset cycle. Always false for the default single-tier (pinned-IP-only) setup.
+
+### Transport watchdog (`go/internal/telegram/watchdog.go`)
+`transportWatch` is a goroutine (started by `Bot.Start`) that proactively alerts the user when the path to Telegram degrades or breaks, and again when it recovers — Telegram never pushes a notification for a silent fallback, so otherwise the user only learns the link broke when a command goes unanswered. Every 60s it runs a `getMe` reachability probe and samples `Tiers.Degraded()`. Two edge-triggered episodes, each a standalone (untracked) message via `sendAlert`:
+
+- **Outage**: `getMe` fails `watchOutageThreshold` (2) times in a row. The "entered" alert can't be delivered (we're offline), so only the recovery message is sent, reporting outage duration.
+- **Degradation**: `Degraded()` true while still reachable (primary path down, on fallback). Both enter and recover alerts are deliverable. No-op for the single-tier default.
+
 `discovery.go` queries DoH (`transport.DefaultDoHEndpoints`, all IP-literal URLs; podkop's own DoH endpoint is prepended by `dohEndpointsFromPodkop` **only when its host is an IP literal** — a hostname endpoint would need the possibly-broken system resolver to bootstrap, so it's skipped) for current `api.telegram.org` A records **concurrently** (one goroutine per endpoint, so a blocked resolver can't serialize the rest), filters to known Telegram CIDRs, and logs any answer that falls outside every known CIDR (early signal the hardcoded list is drifting). Refresh schedule: initial run 30s after startup, then every 24h. Discovered IPs are merged with the compiled `defaultEmergencyIPs` in `main.go` so a thin DoH reply never shrinks coverage. Merged set is persisted to UCI (`emergency_ips`) so reboots start with the last known list.
 
 ### Telegram state machine (`go/internal/telegram/`)

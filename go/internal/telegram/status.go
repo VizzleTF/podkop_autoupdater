@@ -32,12 +32,7 @@ func (t *Bot) allowTextCmd(update *models.Update, name string) bool {
 // sendText posts a standalone (untracked) message. Used for /status, /log and
 // busy notices that should not disturb the tracked menu.
 func (t *Bot) sendText(ctx context.Context, text string) {
-	_, err := t.b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    t.chatIDStr(),
-		Text:      t.withLabel(text),
-		ParseMode: models.ParseModeHTML,
-	})
-	if err != nil {
+	if err := t.sendAlert(ctx, text); err != nil {
 		logger.Errf("sendText: %v", err)
 	}
 }

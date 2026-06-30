@@ -21,9 +21,11 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -52,10 +54,11 @@ type tier struct {
 type TieredTransport struct {
 	pinnedHost string
 
-	mu     sync.Mutex
-	tiers  []*tier
-	idx    int              // sticky index (last known good tier)
-	ipTier *pinnedTransport // the pinned-IP tier, for in-place IP updates
+	mu       sync.Mutex
+	tiers    []*tier
+	idx      int              // sticky index (last known good tier)
+	degraded bool             // last successful request used a non-preferred tier (idx != 0)
+	ipTier   *pinnedTransport // the pinned-IP tier, for in-place IP updates
 }
 
 // New builds the standard transport for podkop_updater:
@@ -126,6 +129,17 @@ func (t *TieredTransport) Tiers() []string {
 	return names
 }
 
+// Degraded reports whether the last successful request fell through to a
+// non-preferred tier (e.g. SOCKS5 down, traffic on pinned IPs). Unaffected by
+// ResetSticky's optimistic nudge — it reflects the last actual success, so a
+// watchdog polling it won't see spurious recover/degrade flaps every reset
+// cycle. Always false when there is only one tier.
+func (t *TieredTransport) Degraded() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.degraded
+}
+
 // CurrentTier returns the name of the sticky tier.
 func (t *TieredTransport) CurrentTier() string {
 	t.mu.Lock()
@@ -140,6 +154,15 @@ func (t *TieredTransport) CurrentTier() string {
 // walks the cascade in order. Returns the first successful response, or an
 // error wrapping the last attempt's error.
 func (t *TieredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// We retry the request across tiers, but http.RoundTripper closes req.Body
+	// even on failure. If the body isn't replayable (GetBody == nil — e.g. the
+	// go-telegram/bot multipart pipe), the first failing tier closes it and
+	// every later tier reads from a closed body. Buffer it once and install a
+	// GetBody so each cloneReq below gets a fresh independent reader.
+	if err := ensureReplayableBody(req); err != nil {
+		return nil, err
+	}
+
 	t.mu.Lock()
 	snapshot := append([]*tier(nil), t.tiers...)
 	start := t.idx
@@ -160,9 +183,14 @@ func (t *TieredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err == nil {
 			t.mu.Lock()
 			// Only update sticky if the underlying slice hasn't been swapped.
-			if i < len(t.tiers) && t.tiers[i] == snapshot[i] && t.idx != i {
-				logger.Logf("Transport: switched to %s", snapshot[i].name)
-				t.idx = i
+			if i < len(t.tiers) && t.tiers[i] == snapshot[i] {
+				if t.idx != i {
+					logger.Logf("Transport: switched to %s", snapshot[i].name)
+					t.idx = i
+				}
+				// Health truth tracks the *actual* successful tier, not the
+				// optimistic ResetSticky nudge — so the watchdog doesn't flap.
+				t.degraded = i != 0
 			}
 			t.mu.Unlock()
 			return resp, nil
@@ -171,6 +199,26 @@ func (t *TieredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		lastErr = err
 	}
 	return nil, fmt.Errorf("all tiers failed: %w", lastErr)
+}
+
+// ensureReplayableBody buffers req.Body into memory and installs a GetBody so
+// the request can be retried across tiers. No-op when there is no body or the
+// body is already replayable (GetBody set, e.g. bodies from http.NewRequest
+// with a bytes/strings reader). Telegram API request bodies are small.
+func ensureReplayableBody(req *http.Request) error {
+	if req.Body == nil || req.GetBody != nil {
+		return nil
+	}
+	data, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	if err != nil {
+		return err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	return nil
 }
 
 func cloneReq(req *http.Request) *http.Request {
