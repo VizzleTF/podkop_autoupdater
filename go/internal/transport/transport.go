@@ -23,13 +23,13 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -231,29 +231,45 @@ func cloneReq(req *http.Request) *http.Request {
 	return r2
 }
 
-// pinnedTransport is an http.RoundTripper whose dialer, when connecting to the
-// pinned host, substitutes a known IP from a swappable set and falls through
-// the set until one connects. Every other host is dialed normally (system
-// resolver), so non-Telegram traffic (e.g. github fetches) keeps working.
+// pinnedTransport is an http.RoundTripper whose TLS dialer, when connecting to
+// the pinned host, substitutes a known IP from a swappable set and walks the
+// set until one completes a full TLS handshake. Every other host is dialed
+// normally (system resolver), so non-Telegram traffic (e.g. github fetches)
+// keeps working.
 //
-// SNI and TLS host verification still use the original hostname, so the
-// certificate validates correctly even though we dial a raw IP.
+// The TLS handshake runs *inside* the dialer (DialTLSContext), not at the
+// http.Transport layer. This is deliberate: a Telegram IP that accepts TCP but
+// serves a broken/foreign TLS endpoint (common when a hardcoded DC IP is not
+// reachable from a given geo — it half-answers instead of refusing) would, if
+// we only checked TCP connect, be handed up as a "good" connection and then
+// fail the handshake with no retry onto another IP. Handshaking in the dialer
+// lets us skip such a poisoned IP within the same request and land on a live
+// one, so the path stays up as long as *any* pinned IP works.
+//
+// SNI and certificate verification use the original hostname, so the cert
+// validates correctly even though we dial a raw IP.
+//
+// lastGood remembers the IP that last handshook so steady-state redials try it
+// first, avoiding a walk over dead/poisoned IPs on every reconnect.
 type pinnedTransport struct {
-	host string
-	rt   *http.Transport
+	host      string
+	rt        *http.Transport
+	tlsConfig *tls.Config // base cloned per dial (ServerName/NextProtos set per call); nil → zero value. Test seam for custom roots.
 
-	mu  sync.RWMutex
-	ips []string
-	rr  atomic.Uint32 // round-robin start offset, spreads fresh dials across IPs
+	mu       sync.RWMutex
+	ips      []string
+	lastGood string
 }
 
 func newPinnedTransport(host string, ips []string) *pinnedTransport {
 	pt := &pinnedTransport{host: host}
 	pt.setIPs(ips)
 	pt.rt = &http.Transport{
-		DialContext:         pt.dial,
-		TLSHandshakeTimeout: defaultTLSTimeout,
-		IdleConnTimeout:     defaultIdleConnTimeout,
+		DialTLSContext:  pt.dialTLS,
+		IdleConnTimeout: defaultIdleConnTimeout,
+		// We handshake ourselves and force HTTP/1.1, so leave the Transport's
+		// own HTTP/2 wiring off (it would need to inspect the negotiated proto).
+		ForceAttemptHTTP2: false,
 	}
 	return pt
 }
@@ -278,32 +294,103 @@ func (pt *pinnedTransport) snapshot() []string {
 	return pt.ips
 }
 
-func (pt *pinnedTransport) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+// orderedIPs returns the current IP set with the last-known-good IP moved to
+// the front (if it is still in the set), so a reconnect retries the working IP
+// before walking the rest.
+func (pt *pinnedTransport) orderedIPs() []string {
+	pt.mu.RLock()
+	ips := pt.ips
+	good := pt.lastGood
+	pt.mu.RUnlock()
+	if good == "" || len(ips) == 0 {
+		return ips
+	}
+	out := make([]string, 0, len(ips))
+	if contains(ips, good) {
+		out = append(out, good)
+	}
+	for _, ip := range ips {
+		if ip != good {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func (pt *pinnedTransport) setLastGood(ip string) {
+	pt.mu.Lock()
+	pt.lastGood = ip
+	pt.mu.Unlock()
+}
+
+// dialTLS establishes a TLS connection. For the pinned host it walks the IP set
+// doing a full TLS handshake per IP, skipping any that fail either TCP connect
+// or the handshake. For any other host it resolves and dials normally.
+func (pt *pinnedTransport) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
 	if host != pt.host {
-		// Non-pinned host (e.g. github): dial via the system resolver.
-		return dialer().DialContext(ctx, network, addr)
+		// Non-pinned host (e.g. github): resolve + dial + TLS normally.
+		return pt.tlsDial(ctx, network, addr, host)
 	}
-	ips := pt.snapshot()
+	ips := pt.orderedIPs()
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("transport: no pinned IPs for %s", host)
 	}
-	start := int(pt.rr.Add(1)-1) % len(ips)
-	d := dialer()
 	var lastErr error
-	for i := 0; i < len(ips); i++ {
-		ip := ips[(start+i)%len(ips)]
-		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+	for _, ip := range ips {
+		conn, err := pt.tlsDial(ctx, network, net.JoinHostPort(ip, port), pt.host)
 		if err == nil {
+			pt.setLastGood(ip)
 			return conn, nil
 		}
 		lastErr = err
-		logger.Logf("Transport: telegram IP %s dial failed: %v", ip, err)
+		logger.Logf("Transport: telegram IP %s failed: %v", ip, err)
 	}
 	return nil, fmt.Errorf("all telegram IPs failed: %w", lastErr)
+}
+
+// tlsDial opens a TCP connection to addr and performs a TLS handshake using
+// serverName for SNI and certificate verification (so a raw-IP addr still
+// validates against the real hostname's cert).
+func (pt *pinnedTransport) tlsDial(ctx context.Context, network, addr, serverName string) (net.Conn, error) {
+	raw, err := dialer().DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	var cfg *tls.Config
+	if pt.tlsConfig != nil {
+		cfg = pt.tlsConfig.Clone()
+	} else {
+		cfg = &tls.Config{}
+	}
+	cfg.ServerName = serverName
+	if len(cfg.NextProtos) == 0 {
+		cfg.NextProtos = []string{"http/1.1"}
+	}
+	hctx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		hctx, cancel = context.WithTimeout(ctx, defaultTLSTimeout)
+		defer cancel()
+	}
+	tconn := tls.Client(raw, cfg)
+	if err := tconn.HandshakeContext(hctx); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return tconn, nil
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func socksRoundTripper(socksAddr string) http.RoundTripper {

@@ -1,7 +1,8 @@
 package transport
 
 import (
-	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,14 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+// trustServer returns a tls.Config that trusts the given httptest TLS server's
+// self-signed certificate, so the pinned dialer's handshake validates.
+func trustServer(srv *httptest.Server) *tls.Config {
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return &tls.Config{RootCAs: pool}
+}
 
 // fakeRT is a controllable RoundTripper for cascade tests.
 type fakeRT struct {
@@ -105,41 +114,69 @@ func TestRoundTrip_Sticky(t *testing.T) {
 	}
 }
 
-// TestPinnedDial_SubstitutesIP verifies the pinned host is dialed at one of
-// the configured IPs (not via the system resolver) and that an unreachable IP
-// falls through to the next one.
+// TestPinnedDial_SubstitutesIP verifies the pinned host is dialed at one of the
+// configured IPs and that a dead IP falls through to a live one, which then
+// completes a full TLS handshake and is remembered as last-good.
 func TestPinnedDial_SubstitutesIP(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-	host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "https://"))
 
-	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1", host})
-	var dialed []string
-	base := pt.rt.DialContext
-	pt.rt.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dialed = append(dialed, addr)
-		return base(ctx, network, addr)
-	}
+	// First IP is dead (RFC5737 TEST-NET); second is the live TLS server.
+	pt := newPinnedTransport(host, []string{"192.0.2.1", host})
+	pt.tlsConfig = trustServer(srv)
 
-	req, _ := http.NewRequest("GET", "http://pinned.example:"+port+"/", nil)
+	req, _ := http.NewRequest("GET", "https://"+host+":"+port+"/", nil)
 	resp, err := pt.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("RoundTrip: %v", err)
 	}
 	resp.Body.Close()
-	// The request addr handed to DialContext must be the pinned host, never a
-	// resolved IP — substitution happens inside dial.
-	if len(dialed) == 0 || dialed[0] != "pinned.example:"+port {
-		t.Fatalf("expected dial to pinned host, got %v", dialed)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	// The live IP must be remembered so reconnects skip the dead one.
+	if got := pt.lastGood; got != host {
+		t.Fatalf("lastGood = %q, want %q", got, host)
+	}
+}
+
+// TestPinnedDial_SkipsPoisonedIP is the regression for the real bug: an IP that
+// accepts TCP but serves broken TLS (writes garbage instead of a handshake)
+// must fail *inside* the dialer, not be handed up as a good connection. The
+// walk onto a live IP after such a failure is covered by SubstitutesIP.
+func TestPinnedDial_SkipsPoisonedIP(t *testing.T) {
+	// Poison server: accepts TCP, then writes garbage instead of a TLS record.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("this is not a TLS handshake\n"))
+			_ = c.Close()
+		}
+	}()
+
+	pt := newPinnedTransport("api.test", nil)
+	conn, err := pt.tlsDial(t.Context(), "tcp", ln.Addr().String(), "api.test")
+	if err == nil {
+		conn.Close()
+		t.Fatal("TCP-ok but TLS-broken IP must fail in the dialer, got success")
 	}
 }
 
 // TestPinnedDial_AllIPsDead returns an error mentioning the pinned failure.
 func TestPinnedDial_AllIPsDead(t *testing.T) {
 	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1", "192.0.2.2"})
-	req, _ := http.NewRequest("GET", "http://pinned.example:9/", nil)
+	req, _ := http.NewRequest("GET", "https://pinned.example:9/", nil)
 	_, err := pt.RoundTrip(req)
 	if err == nil {
 		t.Fatal("want error when all pinned IPs dead")
@@ -149,11 +186,12 @@ func TestPinnedDial_AllIPsDead(t *testing.T) {
 // TestPinnedDial_OtherHostUsesResolver confirms a non-pinned host is dialed
 // normally (so github fetches still work).
 func TestPinnedDial_OtherHostUsesResolver(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
 	pt := newPinnedTransport("pinned.example", []string{"192.0.2.1"})
+	pt.tlsConfig = trustServer(srv)
 	req, _ := http.NewRequest("GET", srv.URL+"/", nil)
 	resp, err := pt.RoundTrip(req)
 	if err != nil {
