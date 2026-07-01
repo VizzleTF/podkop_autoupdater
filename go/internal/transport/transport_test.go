@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // trustServer returns a tls.Config that trusts the given httptest TLS server's
@@ -137,9 +138,36 @@ func TestPinnedDial_SubstitutesIP(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	// The live IP must be remembered so reconnects skip the dead one.
-	if got := pt.lastGood; got != host {
-		t.Fatalf("lastGood = %q, want %q", got, host)
+	// The live IP must be marked healthy and the dead one marked failed, so a
+	// reconnect (via orderedIPs) tries the live IP first.
+	if h := pt.health[host]; h == nil || h.okAt.IsZero() {
+		t.Fatalf("live IP %q not marked healthy: %+v", host, h)
+	}
+	if h := pt.health["192.0.2.1"]; h == nil || h.errAt.IsZero() {
+		t.Fatalf("dead IP not marked failed: %+v", h)
+	}
+	if got := pt.orderedIPs(); got[0] != host {
+		t.Fatalf("healthy IP should sort first, got order %v", got)
+	}
+}
+
+// TestPinnedDial_HealthOrdering verifies orderedIPs ranks healthy → unknown →
+// failed, with stalest failure last-but-first-among-failed for re-probe.
+func TestPinnedDial_HealthOrdering(t *testing.T) {
+	pt := newPinnedTransport("api.test", []string{"good", "unknown", "freshFail", "staleFail"})
+	// Seed health directly.
+	now := time.Now()
+	pt.health["good"] = &ipHealth{okAt: now}
+	pt.health["staleFail"] = &ipHealth{errAt: now.Add(-time.Hour)}
+	pt.health["freshFail"] = &ipHealth{errAt: now}
+	// "unknown" left absent.
+
+	got := pt.orderedIPs()
+	want := []string{"good", "unknown", "staleFail", "freshFail"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
 	}
 }
 

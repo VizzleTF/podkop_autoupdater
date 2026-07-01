@@ -29,6 +29,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -249,16 +250,27 @@ func cloneReq(req *http.Request) *http.Request {
 // SNI and certificate verification use the original hostname, so the cert
 // validates correctly even though we dial a raw IP.
 //
-// lastGood remembers the IP that last handshook so steady-state redials try it
-// first, avoiding a walk over dead/poisoned IPs on every reconnect.
+// Per-IP health (ipHealth) ranks the dial order: IPs that last handshook come
+// first, never-tried IPs next, and IPs whose last attempt failed last (stalest
+// failure first, so a temporarily-unreachable Telegram IP is eventually
+// re-probed rather than pinned-dead forever). This mirrors TDLib's
+// DcOptionsSet::Stat ok/error/check model and subsumes a single sticky
+// last-good: steady state dials one healthy IP, and dead/poisoned IPs sink out
+// of the way instead of costing a connect timeout on every reconnect.
 type pinnedTransport struct {
 	host      string
 	rt        *http.Transport
 	tlsConfig *tls.Config // base cloned per dial (ServerName/NextProtos set per call); nil → zero value. Test seam for custom roots.
 
-	mu       sync.RWMutex
-	ips      []string
-	lastGood string
+	mu     sync.RWMutex
+	ips    []string
+	health map[string]*ipHealth // per-IP last ok/error times; pruned to current ips
+}
+
+// ipHealth records the last successful and last failed dial times for one IP.
+type ipHealth struct {
+	okAt  time.Time
+	errAt time.Time
 }
 
 func newPinnedTransport(host string, ips []string) *pinnedTransport {
@@ -282,6 +294,14 @@ func (pt *pinnedTransport) setIPs(ips []string) {
 	cp := append([]string(nil), ips...)
 	pt.mu.Lock()
 	pt.ips = cp
+	// Keep health only for IPs still in the set; new IPs start unknown.
+	keep := make(map[string]*ipHealth, len(cp))
+	for _, ip := range cp {
+		if h, ok := pt.health[ip]; ok {
+			keep[ip] = h
+		}
+	}
+	pt.health = keep
 	pt.mu.Unlock()
 }
 
@@ -294,32 +314,62 @@ func (pt *pinnedTransport) snapshot() []string {
 	return pt.ips
 }
 
-// orderedIPs returns the current IP set with the last-known-good IP moved to
-// the front (if it is still in the set), so a reconnect retries the working IP
-// before walking the rest.
+// orderedIPs returns the current IP set sorted by health: healthy IPs first
+// (most-recent success first), then never-tried IPs, then failed IPs (stalest
+// failure first, so a long-dead IP is the last resort but still eventually
+// re-probed). A reconnect thus tries a known-good IP before ever touching a
+// dead/poisoned one.
 func (pt *pinnedTransport) orderedIPs() []string {
 	pt.mu.RLock()
-	ips := pt.ips
-	good := pt.lastGood
-	pt.mu.RUnlock()
-	if good == "" || len(ips) == 0 {
-		return ips
-	}
-	out := make([]string, 0, len(ips))
-	if contains(ips, good) {
-		out = append(out, good)
-	}
+	ips := append([]string(nil), pt.ips...)
+	rank := make(map[string]int, len(ips))
+	okAt := make(map[string]time.Time, len(ips))
+	errAt := make(map[string]time.Time, len(ips))
 	for _, ip := range ips {
-		if ip != good {
-			out = append(out, ip)
+		h := pt.health[ip]
+		switch {
+		case h == nil || (h.okAt.IsZero() && h.errAt.IsZero()):
+			rank[ip] = 1 // unknown
+		case h.okAt.After(h.errAt):
+			rank[ip] = 0 // healthy
+			okAt[ip] = h.okAt
+		default:
+			rank[ip] = 2 // failed
+			errAt[ip] = h.errAt
 		}
 	}
-	return out
+	pt.mu.RUnlock()
+
+	sort.SliceStable(ips, func(i, j int) bool {
+		a, b := ips[i], ips[j]
+		if rank[a] != rank[b] {
+			return rank[a] < rank[b]
+		}
+		switch rank[a] {
+		case 0: // healthy: most-recent success first
+			return okAt[a].After(okAt[b])
+		case 2: // failed: stalest failure first (most due for a re-probe)
+			return errAt[a].Before(errAt[b])
+		}
+		return false // unknown: preserve input order
+	})
+	return ips
 }
 
-func (pt *pinnedTransport) setLastGood(ip string) {
+// mark records the outcome of a dial attempt against ip.
+func (pt *pinnedTransport) mark(ip string, ok bool) {
 	pt.mu.Lock()
-	pt.lastGood = ip
+	h := pt.health[ip]
+	if h == nil {
+		h = &ipHealth{}
+		pt.health[ip] = h
+	}
+	now := time.Now()
+	if ok {
+		h.okAt = now
+	} else {
+		h.errAt = now
+	}
 	pt.mu.Unlock()
 }
 
@@ -343,9 +393,10 @@ func (pt *pinnedTransport) dialTLS(ctx context.Context, network, addr string) (n
 	for _, ip := range ips {
 		conn, err := pt.tlsDial(ctx, network, net.JoinHostPort(ip, port), pt.host)
 		if err == nil {
-			pt.setLastGood(ip)
+			pt.mark(ip, true)
 			return conn, nil
 		}
+		pt.mark(ip, false)
 		lastErr = err
 		logger.Logf("Transport: telegram IP %s failed: %v", ip, err)
 	}
@@ -382,15 +433,6 @@ func (pt *pinnedTransport) tlsDial(ctx context.Context, network, addr, serverNam
 		return nil, err
 	}
 	return tconn, nil
-}
-
-func contains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 func socksRoundTripper(socksAddr string) http.RoundTripper {
