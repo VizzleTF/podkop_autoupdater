@@ -43,6 +43,9 @@ type TierReporter interface {
 	// Degraded reports whether traffic is on a non-preferred fallback tier
 	// (primary path down). Drives the transport watchdog alerts.
 	Degraded() bool
+	// LastSuccess is the wall time of the last successful round-trip through
+	// any tier — the watchdog's passive liveness signal.
+	LastSuccess() time.Time
 }
 
 // Bot is the daemon-side Telegram client. The Bot struct itself holds only

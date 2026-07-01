@@ -55,11 +55,12 @@ type tier struct {
 type TieredTransport struct {
 	pinnedHost string
 
-	mu       sync.Mutex
-	tiers    []*tier
-	idx      int              // sticky index (last known good tier)
-	degraded bool             // last successful request used a non-preferred tier (idx != 0)
-	ipTier   *pinnedTransport // the pinned-IP tier, for in-place IP updates
+	mu            sync.Mutex
+	tiers         []*tier
+	idx           int              // sticky index (last known good tier)
+	degraded      bool             // last successful request used a non-preferred tier (idx != 0)
+	ipTier        *pinnedTransport // the pinned-IP tier, for in-place IP updates
+	lastSuccessAt time.Time        // wall time of the last successful round-trip (passive liveness signal)
 }
 
 // New builds the standard transport for podkop_updater:
@@ -75,10 +76,11 @@ func New(socksAddr, telegramHost string, emergencyIPs []string) *TieredTransport
 	pt := newPinnedTransport(telegramHost, emergencyIPs)
 	tiers = append(tiers, &tier{name: ipTierName(emergencyIPs), rt: pt})
 	return &TieredTransport{
-		pinnedHost: telegramHost,
-		tiers:      tiers,
-		idx:        0,
-		ipTier:     pt,
+		pinnedHost:    telegramHost,
+		tiers:         tiers,
+		idx:           0,
+		ipTier:        pt,
+		lastSuccessAt: time.Now(), // assume healthy at boot; first request confirms
 	}
 }
 
@@ -141,6 +143,17 @@ func (t *TieredTransport) Degraded() bool {
 	return t.degraded
 }
 
+// LastSuccess returns the wall-clock time of the last successful round-trip
+// through any tier. The watchdog uses time-since-LastSuccess as a passive
+// liveness signal: a healthy long-poll completes one round-trip per poll
+// window, so a stale value means the actual data path (not a synthetic probe)
+// has stopped completing requests.
+func (t *TieredTransport) LastSuccess() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastSuccessAt
+}
+
 // CurrentTier returns the name of the sticky tier.
 func (t *TieredTransport) CurrentTier() string {
 	t.mu.Lock()
@@ -183,6 +196,10 @@ func (t *TieredTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp, err := snapshot[i].rt.RoundTrip(cloneReq(req))
 		if err == nil {
 			t.mu.Lock()
+			// Any successful round-trip is proof the data path is alive — this is
+			// the passive liveness signal the watchdog reads (long-poll completes
+			// one round-trip per poll window, so this advances even when idle).
+			t.lastSuccessAt = time.Now()
 			// Only update sticky if the underlying slice hasn't been swapped.
 			if i < len(t.tiers) && t.tiers[i] == snapshot[i] {
 				if t.idx != i {

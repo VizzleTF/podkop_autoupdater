@@ -315,6 +315,34 @@ func TestEnsureReplayableBody(t *testing.T) {
 	}
 }
 
+// TestLastSuccess_TracksRoundTrip verifies LastSuccess advances on a successful
+// round-trip (the passive liveness signal) and stays put when all tiers fail.
+func TestLastSuccess_TracksRoundTrip(t *testing.T) {
+	a := &fakeRT{name: "a"}
+	tt := newTiered(t, a)
+	before := time.Now().Add(-time.Hour)
+	tt.lastSuccessAt = before
+
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	if _, err := tt.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if !tt.LastSuccess().After(before) {
+		t.Fatal("LastSuccess should advance after a successful round-trip")
+	}
+
+	// All-fail must NOT advance LastSuccess.
+	dead := &fakeRT{name: "dead", fail: true}
+	tt2 := newTiered(t, dead)
+	tt2.lastSuccessAt = before
+	if _, err := tt2.RoundTrip(req); err == nil {
+		t.Fatal("want error")
+	}
+	if !tt2.LastSuccess().Equal(before) {
+		t.Fatal("LastSuccess must not advance when every tier fails")
+	}
+}
+
 func TestRoundTrip_AllFail(t *testing.T) {
 	a := &fakeRT{name: "a", fail: true}
 	b := &fakeRT{name: "b", fail: true}

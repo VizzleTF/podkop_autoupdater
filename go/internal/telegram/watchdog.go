@@ -12,14 +12,17 @@ import (
 )
 
 const (
-	// watchInterval is how often the watchdog probes Telegram reachability and
-	// samples the transport's degraded state.
-	watchInterval = 60 * time.Second
-	// watchProbeTimeout bounds a single getMe reachability probe.
+	// watchInterval is how often the watchdog samples the transport's passive
+	// liveness and degraded state. Cheap (in-memory read), so it ticks often.
+	watchInterval = 30 * time.Second
+	// watchProbeTimeout bounds the single on-demand getMe confirmation probe.
 	watchProbeTimeout = 15 * time.Second
-	// watchOutageThreshold is how many consecutive failed probes declare a full
-	// outage. Avoids alerting on a single transient blip.
-	watchOutageThreshold = 2
+	// watchLivenessStale is how long the data path may go without a successful
+	// round-trip before it is suspect. Must exceed the long-poll window (60s)
+	// plus the client slack (15s) so a normally-cycling idle long-poll — which
+	// completes one round-trip per window — never looks stale. A stale value
+	// means the real path (not a synthetic probe) has stopped completing.
+	watchLivenessStale = 100 * time.Second
 )
 
 // sendAlert posts a standalone (untracked) message and returns the send error,
@@ -39,11 +42,20 @@ func (t *Bot) sendAlert(ctx context.Context, text string) error {
 // notification for a silent fallback, so without this the user only learns the
 // link broke when a command goes unanswered.
 //
+// Liveness is derived from the *actual* data path, not a synthetic poll: a
+// healthy long-poll completes one round-trip per poll window, so the transport
+// advances LastSuccess continuously. The watchdog only fires an on-demand getMe
+// probe when LastSuccess is stale (> watchLivenessStale), to confirm a genuine
+// outage before alerting. This measures the connection that carries updates
+// (not a fresh probe connection) and costs zero extra API calls while healthy.
+//
 // Two independent episodes are tracked, each edge-triggered:
 //
-//   - Outage: getMe fails watchOutageThreshold times in a row. The "entered"
-//     alert can't be delivered (we're offline), so only the recovery message is
-//     sent, reporting how long the outage lasted.
+//   - Outage: no successful round-trip within watchLivenessStale AND the
+//     confirmation getMe fails. The "entered" alert can't be delivered (we're
+//     offline), so only the recovery message is sent, reporting how long the
+//     path was down (measured from the last successful round-trip). Recovery is
+//     detected passively — when the long-poll resumes, LastSuccess advances.
 //   - Degradation: traffic fell through to a non-preferred tier (e.g. SOCKS5
 //     down, now on pinned IPs) while Telegram is still reachable. Both the
 //     enter and recover alerts are deliverable. Skipped entirely for the
@@ -57,9 +69,8 @@ func (t *Bot) transportWatch(ctx context.Context) {
 	defer ticker.Stop()
 
 	var (
-		probeFails  int
-		firstFailAt time.Time
 		outage      bool
+		outageStart time.Time // last-alive time when the outage was declared
 
 		degraded       bool // last sampled degraded state
 		degradeAlerted bool // whether the "entered degradation" alert was delivered
@@ -72,27 +83,26 @@ func (t *Bot) transportWatch(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		pctx, cancel := context.WithTimeout(ctx, watchProbeTimeout)
-		_, err := t.b.GetMe(pctx)
-		cancel()
-		reachable := err == nil
+		// Passive liveness first: only spend an active probe if the real path
+		// has gone quiet longer than a healthy long-poll ever would.
+		reachable := true
+		if time.Since(t.tiers.LastSuccess()) > watchLivenessStale {
+			pctx, cancel := context.WithTimeout(ctx, watchProbeTimeout)
+			_, err := t.b.GetMe(pctx)
+			cancel()
+			reachable = err == nil
+		}
 
 		// --- Outage episode ---
-		if reachable {
-			probeFails = 0
-		} else {
-			if probeFails == 0 {
-				firstFailAt = time.Now()
-			}
-			probeFails++
-		}
 		switch {
-		case !outage && probeFails >= watchOutageThreshold:
+		case !outage && !reachable:
 			outage = true
-			logger.Errf("Watchdog: Telegram unreachable (%d consecutive probe fails)", probeFails)
+			outageStart = t.tiers.LastSuccess()
+			logger.Errf("Watchdog: Telegram unreachable (no round-trip for %s, probe failed)",
+				time.Since(outageStart).Round(time.Second))
 		case outage && reachable:
 			outage = false
-			dur := time.Since(firstFailAt).Round(time.Second)
+			dur := time.Since(outageStart).Round(time.Second)
 			logger.Logf("Watchdog: Telegram reachable again after %s", dur)
 			_ = t.sendAlert(ctx, fmt.Sprintf(
 				"✅ Связь с Telegram восстановлена\nБыл недоступен ~%s · канал: %s",
