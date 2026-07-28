@@ -17,10 +17,29 @@
   ретеншен, имя роутера, админы, обновление emergency-IP, показ конфига
 - Контроль доступа по Telegram user ID; guard от двойного клика на root-действиях
 - `install.sh` с пином на тег релиза; self-update сверяется с опубликованным `.sha256`
+- Подписанные пакеты OpenWrt для обеих релиз-линий, собранные через [owfeed](https://github.com/VizzleTF/owfeed)
 - 3-уровневый транспорт: podkop SOCKS5 → прямой → аварийные IP Telegram (DoH, sticky)
 - Проверка DNS после каждого restart / update / отката
 
 ## Установка
+
+### Из community-фида (рекомендуется)
+
+Релизы содержат подписанные пакеты OpenWrt, поэтому `apk`/`opkg` проверяет то, что ставит, а
+`apk upgrade` держит версию свежей. Фид добавляется один раз — сниппет для вашей релиз-линии
+лежит в [VizzleTF/owfeed-packages](https://github.com/VizzleTF/owfeed-packages) — дальше:
+
+```sh
+apk add podkop-updater      # 25.12 и новее
+opkg install podkop-updater # 24.10 и старее
+```
+
+Пакет ставит бинарь и procd-сервис и на этом останавливается: демону нужен токен бота
+([@BotFather](https://t.me/BotFather)) и chat id ([@get_id_bot](https://t.me/get_id_bot)), которые
+можете дать только вы, — и печатает три команды, которые это доделывают.
+
+### Скриптом-установщиком
+
 ```sh
 sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
 ```

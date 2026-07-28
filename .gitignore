@@ -1,1 +1,11 @@
 .claude
+
+# Build output and the tool that produces it.
+go/dist/
+dist/
+owfeed
+
+# A published signing key cannot be revoked, so one must never reach a commit.
+*.pem
+*.key
+*.sec

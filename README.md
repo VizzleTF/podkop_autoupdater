@@ -19,10 +19,30 @@ update / rollback / restart / config-backup from a Telegram dashboard.
   retention, label, admins, emergency-IP refresh, show config
 - Access control by Telegram user ID; double-click guard on root actions
 - `install.sh` pinned to the release tag; self-update verified against a published `.sha256`
+- Signed OpenWrt packages for both release lines, built with [owfeed](https://github.com/VizzleTF/owfeed)
 - Tiered transport: podkop SOCKS5 → direct → emergency Telegram IPs (DoH-refreshed, sticky)
 - DNS health check after every restart / update / rollback
 
 ## Install
+
+### From the community feed (recommended)
+
+Releases ship signed OpenWrt packages, so `apk`/`opkg` verifies what it installs and
+`apk upgrade` keeps it current. Add the feed once —
+[VizzleTF/owfeed-packages](https://github.com/VizzleTF/owfeed-packages) has the snippet for
+your release line — then:
+
+```sh
+apk add podkop-updater      # 25.12 and later
+opkg install podkop-updater # 24.10 and earlier
+```
+
+The package installs the binary and the procd service and stops there: the daemon needs a bot
+token ([@BotFather](https://t.me/BotFather)) and a chat id ([@get_id_bot](https://t.me/get_id_bot)),
+which only you can supply, and it prints the three commands that finish the job.
+
+### From the installer script
+
 ```sh
 sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater/main/install.sh)"
 ```

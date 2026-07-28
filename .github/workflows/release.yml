@@ -7,7 +7,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # A package's identity is a hash over its payload and mkpkg records mtimes, so
+  # without a fixed epoch a rebuild of identical content produces a package that
+  # claims to be new. A constant, not a timestamp: identity should depend on what a
+  # package contains and nothing else.
+  SOURCE_DATE_EPOCH: '1700000000'
 
 jobs:
   build:
@@ -50,8 +57,9 @@ jobs:
           CGO_ENABLED: 0
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          EXTRA_ENV: ${{ matrix.extra_env }}
         run: |
-          eval "${{ matrix.extra_env }}"
+          eval "$EXTRA_ENV"
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X main.version=${GITHUB_REF_NAME:-dev}" \
@@ -82,8 +90,16 @@ jobs:
             go/dist/podkop_updater-${{ matrix.target }}
             go/dist/podkop_updater-${{ matrix.target }}.sha256
 
-  release:
-    name: Publish release
+  # OpenWrt packages, built and signed here rather than by whoever carries them.
+  #
+  # This repository used to publish only the bare binaries above, and a community
+  # feed rebuilt them into packages at the far end. That put the knowledge of which
+  # OpenWrt architecture each GOARCH serves, and a copy of the init script, in a
+  # repository that is not this one -- and it meant nothing published here was
+  # signed, because a checksum served by the same host as the artifact says only that
+  # the download was not corrupted.
+  package:
+    name: Build and sign packages
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -94,8 +110,75 @@ jobs:
         with:
           path: artifacts
 
+      - name: Collect the binaries
+        run: |
+          mkdir -p go/dist
+          find artifacts -name 'podkop_updater-*' ! -name '*.sha256' -exec cp {} go/dist/ \;
+          chmod +x go/dist/*
+          ls -l go/dist/
+
+      # owfeed is verified against the build attestation from its own release
+      # workflow before it runs. It is about to hold the key that signs this release.
+      - uses: VizzleTF/owfeed/setup@v0.1.2
+        with:
+          version: v0.1.2
+
+      - name: Stage, build and sign
+        env:
+          # The same usign key that signs this author's other releases. A feed pins
+          # its public half, so a signature there means "the author published this"
+          # rather than "this downloaded successfully". The manifest records which
+          # repository it belongs to and readers check that, because one key signing
+          # several repositories is exactly how a manifest lifted from one of them
+          # would otherwise verify as another.
+          OWFEED_RELEASE_KEY: ${{ secrets.OWFEED_RELEASE_KEY }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            *-r[0-9]*) ;;
+            # APKv3 wants a package revision, and a tag rarely carries one.
+            *) version="${version}-r1" ;;
+          esac
+          ./tools/stage.sh "$version"
+          owfeed --frozen-lock build
+          owfeed release --repo "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages
+          path: |
+            dist/manifest.txt
+            dist/manifest.txt.sig
+            dist/*/*.apk
+            dist/*/*.ipk
+            dist/*/*.sig
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: [build, package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      # Release assets are flat. `owfeed release` has already made every package
+      # filename unique -- an apk's name carries no architecture, because in a feed
+      # the architecture is the directory, so twenty architectures would otherwise
+      # produce twenty files with one name and nineteen of them would not exist.
+      - name: Flatten
+        run: |
+          mkdir -p upload
+          find artifacts -type f -exec cp -n {} upload/ \;
+          ls -l upload/ | head -20
+          test -f upload/manifest.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/**/*
+          files: upload/*
           generate_release_notes: true

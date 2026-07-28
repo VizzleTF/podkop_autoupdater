@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://owfeed.dev/schema/v1.json
+#
+# What this repository publishes for OpenWrt.
+#
+# It used to publish bare Go binaries and a .sha256 beside each one, and a community
+# feed rebuilt them into packages at the far end. That put the knowledge of which
+# OpenWrt architecture each GOARCH serves, and the init script, in a repository that
+# is not this one -- so the feed carried a copy of scripts/init.d/podkop_updater and
+# had to be updated whenever this one changed. It also meant nothing this project
+# publishes was signed: a checksum served by the same host as the artifact says only
+# that the file was not corrupted in transit.
+#
+# Now the packages are built and signed here, and the feed carries what was released
+# rather than something it assembled itself.
+version: 1
+
+feed:
+  name: podkop-updater
+  # No feed of its own: `owfeed release` produces a signed manifest for someone
+  # else's feed to consume. The URL is where a user goes to find out what this is.
+  url: https://github.com/VizzleTF/podkop_autoupdater
+
+releases:
+  # 25.12 and later is apk; 24.10 and earlier is opkg. Routers stay on a release for
+  # years, so publishing only the newer line would leave most of the installed base
+  # where it is.
+  - line: "25.12"
+    default: true
+    format: apk
+  - line: "24.10"
+    format: ipk
+
+publish:
+  - target: github-pages
+
+packages:
+  - name: podkop-updater
+    build: mkpkg
+
+    # A static Go binary needs the right GOARCH and no OpenWrt SDK at all, which is
+    # why this is not restricted to noarch. One build serves every architecture that
+    # shares its GOARCH; tools/stage.sh holds that mapping, next to the build that
+    # produces the binaries rather than in whatever repository consumes them.
+    #
+    # The ARMv5 targets (arm926ej-s, fa526, xscale) would need a GOARM=5 build and
+    # this project publishes none, so they are absent rather than covered badly.
+    arch:
+      - x86_64
+      - aarch64_cortex-a53
+      - aarch64_cortex-a72
+      - aarch64_cortex-a76
+      - aarch64_generic
+      - arm_cortex-a5_vfpv4
+      - arm_cortex-a7
+      - arm_cortex-a7_neon-vfpv4
+      - arm_cortex-a7_vfpv4
+      - arm_cortex-a8_vfpv3
+      - arm_cortex-a9
+      - arm_cortex-a9_neon
+      - arm_cortex-a9_vfpv3-d16
+      - arm_cortex-a15_neon-vfpv4
+      - mips_24kc
+      - mips_mips32
+      - mipsel_24kc
+      - mipsel_24kc_24kf
+      - mipsel_74kc
+      - mipsel_mips32
+
+    version-from: file:./dist/version
+    files: ./dist/root/{arch}
+
+    description: "Watches podkop releases and drives update, rollback and restart from Telegram."
+    license: MIT
+    url: https://github.com/VizzleTF/podkop_autoupdater
+    maintainer: "VizzleTF <vizzletf47@gmail.com>"
+
+    # No conffiles, and no /etc/config/podkop_updater in the payload. The daemon
+    # needs a Telegram bot token and a chat id; those are the user's and a package
+    # cannot ship them, and a skeleton with an empty token would only make the
+    # service respawn against a configuration that cannot work. Neither package
+    # manager touches a file the package does not own, so the user's config is safe
+    # across upgrades, and sysupgrade keeps /etc/config wholesale.
+    scripts:
+      post-install: ./pkg/post-install.sh
