@@ -48,6 +48,12 @@ sh -c "$(curl -sfL https://raw.githubusercontent.com/VizzleTF/podkop_autoupdater
 Если на роутере есть свой `/usr/bin/podkop_bot` — отключите его. Два демона
 на один токен воруют друг у друга обновления.
 
+## Релизы
+
+В каждом релизе лежат подписанные пакеты OpenWrt для обеих релиз-линий и голые бинари.
+[RELEASING.md](RELEASING.md) — как выпустить релиз и за что ручается (и за что не ручается)
+ключ подписи `37ddece4c0eef357`.
+
 ## Настройки (UCI `/etc/config/podkop_updater`)
 
 | ключ | значение |

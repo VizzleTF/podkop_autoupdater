@@ -51,6 +51,12 @@ Detects the arch, installs the procd service, prompts for a bot token
 If podkop ships its own `/usr/bin/podkop_bot`, disable it first. Two daemons
 on one token steal each other's updates.
 
+## Releases
+
+Every release ships signed OpenWrt packages for both release lines alongside the bare
+binaries. [RELEASING.md](RELEASING.md) has how to cut one, and what the signing key
+`37ddece4c0eef357` does and does not vouch for.
+
 ## Settings (UCI `/etc/config/podkop_updater`)
 
 | key | meaning |

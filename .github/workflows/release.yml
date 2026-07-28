@@ -125,13 +125,19 @@ jobs:
 
       - name: Stage, build and sign
         env:
-          # The same usign key that signs this author's other releases. A feed pins
-          # its public half, so a signature there means "the author published this"
-          # rather than "this downloaded successfully". The manifest records which
-          # repository it belongs to and readers check that, because one key signing
-          # several repositories is exactly how a manifest lifted from one of them
-          # would otherwise verify as another.
-          OWFEED_RELEASE_KEY: ${{ secrets.OWFEED_RELEASE_KEY }}
+          # usign key 37ddece4c0eef357, this repository's own. A feed pins its
+          # public half -- keys/podkop-updater.pub -- so a signature there means
+          # "the author published this" rather than "this downloaded successfully".
+          #
+          # A key per repository rather than one shared across them: a signature says
+          # who wrote something, never what it is about, so one key signing several
+          # repositories is how a manifest lifted from one of them verifies as
+          # another. The manifest records its `repo` and readers check it, which
+          # closes that either way, but a separate key means the question does not
+          # arise and a compromise here does not reach anything else.
+          #
+          # RELEASING.md has where the key lives and what to do if it is lost.
+          OWFEED_RELEASE_KEY: ${{ secrets.PODKOP_IPD_USIGN_KEY }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           case "$version" in
